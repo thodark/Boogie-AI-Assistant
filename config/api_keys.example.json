@@ -1,0 +1,9 @@
+{
+  "gemini_api_key": "YOUR_GEMINI_API_KEY_HERE",
+  "assistant_name": "Boogie",
+  "user_name": "",
+  "voice": "Aoede",
+  "push_to_talk": false,
+  "brief_enabled": true,
+  "proactive_audio": true
+}

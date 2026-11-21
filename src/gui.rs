@@ -1,0 +1,1718 @@
+use eframe::egui::{
+    self, Align2, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, FontId,
+    Order, Pos2, Rect, ResizeDirection, RichText, Sense, Stroke, Vec2, ViewportCommand,
+};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
+use tokio::sync::{broadcast, mpsc, Mutex};
+
+use crate::orb_shader::{OrbRenderer, OrbUniforms};
+use crate::{AppEvent, AppState, ConfirmResponse, SharedState};
+
+// --- Obsidian + Violet-Cyan Neon Palette ---
+const BG_OBSIDIAN: Color32 = Color32::from_rgb(7, 6, 16);
+const VIOLET: Color32 = Color32::from_rgb(148, 108, 255);
+const CYAN: Color32 = Color32::from_rgb(38, 224, 245);
+const MINT: Color32 = Color32::from_rgb(64, 242, 184);
+const AMBER: Color32 = Color32::from_rgb(255, 162, 72);
+const CRIMSON: Color32 = Color32::from_rgb(255, 76, 114);
+const TEXT_BRIGHT: Color32 = Color32::from_rgb(240, 238, 255);
+const TEXT_SOFT: Color32 = Color32::from_rgb(168, 162, 204);
+const TEXT_MUTED: Color32 = Color32::from_rgb(104, 98, 138);
+
+const HEADER_H: f32 = 42.0;
+const RESIZE_MARGIN: f32 = 6.0;
+const CAPTION_FADE_START: f64 = 10.0;
+const CAPTION_FADE_END: f64 = 18.0;
+const NUM_SPEC_BARS: usize = 14;
+
+#[derive(Clone, PartialEq)]
+enum LogKind {
+    User,
+    Boogie,
+    Tool,
+    System,
+}
+
+struct ChatEntry {
+    kind: LogKind,
+    title: String,
+    body: String,
+    updated_at: f64,
+}
+
+#[derive(Clone)]
+struct ConfirmDisplay {
+    title: String,
+    detail: String,
+}
+
+struct SysMetrics {
+    sys: sysinfo::System,
+    cpu: f32,
+    mem_used_gb: f64,
+    last_update: Instant,
+}
+
+impl SysMetrics {
+    fn new() -> Self {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        let mem_used_gb = sys.used_memory() as f64 / 1_073_741_824.0;
+        Self {
+            sys,
+            cpu: 0.0,
+            mem_used_gb,
+            last_update: Instant::now() - std::time::Duration::from_secs(2),
+        }
+    }
+
+    fn refresh(&mut self) {
+        if self.last_update.elapsed().as_secs() < 2 {
+            return;
+        }
+        self.last_update = Instant::now();
+        self.sys.refresh_cpu_usage();
+        self.sys.refresh_memory();
+        self.cpu = self.sys.global_cpu_usage().clamp(0.0, 100.0);
+        self.mem_used_gb = self.sys.used_memory() as f64 / 1_073_741_824.0;
+    }
+}
+
+pub struct BoogieGui {
+    state: AppState,
+    raw_audio_level: f32,
+    viseme_queue: VecDeque<(f32, f32, f32)>,
+    viseme_hop_secs: f64,
+    viseme_accum: f64,
+
+    // Smooth animated visual parameters
+    smooth_audio: f32,
+    smooth_openness: f32,
+    smooth_width: f32,
+    state_weights: [f32; 4], // [listening, speaking, thinking, sleeping]
+    smooth_muted: f32,
+    smooth_mouse: [f32; 2],
+    click_pulse: f32,
+    drawer_open: bool,
+    drawer_anim: f32,
+    spec_bars: [f32; NUM_SPEC_BARS],
+
+    entries: Vec<ChatEntry>,
+    event_rx: broadcast::Receiver<AppEvent>,
+    shared: Arc<Mutex<SharedState>>,
+    confirm_tx: mpsc::Sender<ConfirmResponse>,
+    interrupt_tx: mpsc::Sender<()>,
+    muted: bool,
+    confirm_pending: Option<ConfirmDisplay>,
+    scroll_to_bottom: bool,
+    metrics: SysMetrics,
+
+    orb_renderer: Option<Arc<StdMutex<OrbRenderer>>>,
+    last_frame_time: f64,
+    egui_time: f64,
+}
+
+impl BoogieGui {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        event_rx: broadcast::Receiver<AppEvent>,
+        shared: Arc<Mutex<SharedState>>,
+        confirm_tx: mpsc::Sender<ConfirmResponse>,
+        interrupt_tx: mpsc::Sender<()>,
+    ) -> Self {
+        setup_fonts(&cc.egui_ctx);
+        apply_obsidian_theme(&cc.egui_ctx);
+
+        let orb_renderer = cc.gl.as_ref().and_then(|gl| match OrbRenderer::new(gl) {
+            Ok(r) => {
+                tracing::info!("3D Liquid Glass Orb GLSL shader compiled");
+                Some(Arc::new(StdMutex::new(r)))
+            }
+            Err(e) => {
+                tracing::error!("Orb GLSL shader init failed (using 2D fallback): {e}");
+                None
+            }
+        });
+
+        Self {
+            state: AppState::Thinking,
+            raw_audio_level: 0.0,
+            viseme_queue: VecDeque::new(),
+            viseme_hop_secs: 0.02,
+            viseme_accum: 0.0,
+
+            smooth_audio: 0.0,
+            smooth_openness: 0.0,
+            smooth_width: 0.0,
+            state_weights: [0.0, 0.0, 1.0, 0.0],
+            smooth_muted: 0.0,
+            smooth_mouse: [0.0, 0.0],
+            click_pulse: 0.0,
+            drawer_open: false,
+            drawer_anim: 0.0,
+            spec_bars: [0.0; NUM_SPEC_BARS],
+
+            entries: Vec::new(),
+            event_rx,
+            shared,
+            confirm_tx,
+            interrupt_tx,
+            muted: false,
+            confirm_pending: None,
+            scroll_to_bottom: false,
+            metrics: SysMetrics::new(),
+
+            orb_renderer,
+            last_frame_time: 0.0,
+            egui_time: 0.0,
+        }
+    }
+
+    fn process_events(&mut self) {
+        while let Ok(event) = self.event_rx.try_recv() {
+            match event {
+                AppEvent::StateChange(s) => {
+                    if s != AppState::Speaking {
+                        self.viseme_queue.clear();
+                    }
+                    self.state = s;
+                }
+                AppEvent::AudioLevel(l) => {
+                    self.raw_audio_level = l.clamp(0.0, 1.0);
+                }
+                AppEvent::Visemes(frames, hop_secs, _) => {
+                    if hop_secs > 0.002 {
+                        self.viseme_hop_secs = hop_secs;
+                    }
+                    for frame in frames {
+                        if self.viseme_queue.len() > 250 {
+                            self.viseme_queue.pop_front();
+                        }
+                        self.viseme_queue.push_back(frame);
+                    }
+                }
+                AppEvent::ConfirmRequest { title, detail } => {
+                    self.confirm_pending = Some(ConfirmDisplay { title, detail });
+                    self.click_pulse = 0.85;
+                }
+                AppEvent::Log(msg) => {
+                    self.push_log_message(msg);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn push_log_message(&mut self, msg: String) {
+        let now = self.egui_time;
+
+        if let Some(rest) = msg.strip_prefix("User: ") {
+            let chunk = rest.trim();
+            if chunk.is_empty() {
+                return;
+            }
+            if let Some(last) = self.entries.last_mut() {
+                if last.kind == LogKind::User && (now - last.updated_at) < 4.5 {
+                    append_transcript_chunk(&mut last.body, chunk);
+                    last.updated_at = now;
+                    self.scroll_to_bottom = true;
+                    return;
+                }
+            }
+            self.entries.push(ChatEntry {
+                kind: LogKind::User,
+                title: "You".to_string(),
+                body: chunk.to_string(),
+                updated_at: now,
+            });
+        } else if let Some(rest) = msg.strip_prefix("Boogie: ") {
+            let chunk = rest.trim();
+            if chunk.is_empty() {
+                return;
+            }
+            if let Some(last) = self.entries.last_mut() {
+                if last.kind == LogKind::Boogie && (now - last.updated_at) < 5.0 {
+                    append_transcript_chunk(&mut last.body, chunk);
+                    last.updated_at = now;
+                    self.scroll_to_bottom = true;
+                    return;
+                }
+            }
+            self.entries.push(ChatEntry {
+                kind: LogKind::Boogie,
+                title: "Boogie".to_string(),
+                body: chunk.to_string(),
+                updated_at: now,
+            });
+        } else if let Some(rest) = msg.strip_prefix("tool: ") {
+            let (tool_title, tool_detail) = format_tool_log(rest);
+            self.entries.push(ChatEntry {
+                kind: LogKind::Tool,
+                title: tool_title,
+                body: tool_detail,
+                updated_at: now,
+            });
+        } else {
+            let trimmed = msg.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            self.entries.push(ChatEntry {
+                kind: LogKind::System,
+                title: String::new(),
+                body: trimmed.to_string(),
+                updated_at: now,
+            });
+        }
+
+        self.scroll_to_bottom = true;
+        if self.entries.len() > 300 {
+            self.entries.drain(..60);
+        }
+    }
+
+    fn update_animations(&mut self, ctx: &egui::Context, dt: f32) {
+        // Advance viseme playback queue at hop rate
+        let (vis_level, vis_open, vis_width) = if !self.viseme_queue.is_empty() {
+            self.viseme_accum += dt as f64;
+            let mut current = *self.viseme_queue.front().unwrap();
+            while self.viseme_accum >= self.viseme_hop_secs && !self.viseme_queue.is_empty() {
+                self.viseme_accum -= self.viseme_hop_secs;
+                current = self.viseme_queue.pop_front().unwrap();
+            }
+            current
+        } else {
+            self.viseme_accum = 0.0;
+            (0.0, 0.0, 0.0)
+        };
+
+        // Combine mic input and Boogie speech output energy
+        let target_audio = match self.state {
+            AppState::Speaking => vis_level.max(self.raw_audio_level * 0.45),
+            AppState::Listening => {
+                if self.muted {
+                    0.0
+                } else {
+                    self.raw_audio_level
+                }
+            }
+            AppState::Thinking => 0.14 + 0.08 * (self.egui_time as f32 * 3.2).sin().abs(),
+            AppState::Sleeping => 0.0,
+        };
+
+        let audio_rate = if target_audio > self.smooth_audio {
+            20.0
+        } else {
+            6.5
+        };
+        self.smooth_audio = exp_lerp(self.smooth_audio, target_audio, audio_rate, dt);
+        self.smooth_openness = exp_lerp(self.smooth_openness, vis_open, 14.0, dt);
+        self.smooth_width = exp_lerp(self.smooth_width, vis_width, 12.0, dt);
+
+        // Smooth state blend weights
+        let target_w = match self.state {
+            AppState::Listening => [1.0, 0.0, 0.0, 0.0],
+            AppState::Speaking => [0.0, 1.0, 0.0, 0.0],
+            AppState::Thinking => [0.0, 0.0, 1.0, 0.0],
+            AppState::Sleeping => [0.0, 0.0, 0.0, 1.0],
+        };
+        for i in 0..4 {
+            self.state_weights[i] = exp_lerp(self.state_weights[i], target_w[i], 3.8, dt);
+        }
+
+        self.smooth_muted = exp_lerp(self.smooth_muted, if self.muted { 1.0 } else { 0.0 }, 7.0, dt);
+        self.drawer_anim = exp_lerp(
+            self.drawer_anim,
+            if self.drawer_open { 1.0 } else { 0.0 },
+            9.5,
+            dt,
+        );
+        self.click_pulse = exp_lerp(self.click_pulse, 0.0, 4.2, dt);
+
+        // Smooth mouse parallax normalized to [-1, 1]
+        let screen = ctx.screen_rect();
+        let target_mouse = ctx.input(|i| {
+            i.pointer.hover_pos().map_or([0.0, 0.0], |pos| {
+                let nx = ((pos.x - screen.center().x) / (screen.width().max(1.0) * 0.5))
+                    .clamp(-1.0, 1.0);
+                let ny = -((pos.y - screen.center().y) / (screen.height().max(1.0) * 0.5))
+                    .clamp(-1.0, 1.0);
+                [nx, ny]
+            })
+        });
+        self.smooth_mouse[0] = exp_lerp(self.smooth_mouse[0], target_mouse[0], 5.5, dt);
+        self.smooth_mouse[1] = exp_lerp(self.smooth_mouse[1], target_mouse[1], 5.5, dt);
+
+        // Update 14-bar dock spectrum visualizer
+        let t = self.egui_time as f32;
+        let energy = self.smooth_audio;
+        let open = self.smooth_openness;
+        for (i, bar) in self.spec_bars.iter_mut().enumerate() {
+            let norm = (i as f32 + 0.5) / NUM_SPEC_BARS as f32;
+            let center_env = 1.0 - (norm - 0.5).abs() * 1.65;
+            let center_env = center_env.clamp(0.18, 1.0);
+
+            let wave1 = (t * 6.5 + i as f32 * 0.68).sin() * 0.5 + 0.5;
+            let wave2 = (t * 10.2 - i as f32 * 1.15).cos() * 0.5 + 0.5;
+            let idle = if self.muted {
+                0.08
+            } else {
+                0.12 + 0.08 * (t * 2.2 + i as f32 * 0.45).sin().abs()
+            };
+            let active = (energy * 0.85 + open * 0.35) * (0.42 + 0.42 * wave1 + 0.28 * wave2);
+            let target = (idle + active * center_env * 1.35).clamp(0.08, 1.0);
+            *bar = exp_lerp(*bar, target, 18.0, dt);
+        }
+    }
+
+    fn state_color(&self) -> Color32 {
+        if self.muted {
+            return CRIMSON;
+        }
+        match self.state {
+            AppState::Listening => VIOLET,
+            AppState::Speaking => CYAN,
+            AppState::Thinking => AMBER,
+            AppState::Sleeping => TEXT_MUTED,
+        }
+    }
+
+    fn state_label(&self) -> &'static str {
+        if self.muted {
+            return "MUTED";
+        }
+        match self.state {
+            AppState::Listening => "LISTENING",
+            AppState::Speaking => "SPEAKING",
+            AppState::Thinking => "THINKING",
+            AppState::Sleeping => "SLEEPING",
+        }
+    }
+
+    /// Enables full 8-direction window resizing on frameless windows.
+    fn handle_frameless_resize(&self, ctx: &egui::Context, screen: Rect) {
+        let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        if is_max {
+            return;
+        }
+
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
+            return;
+        };
+
+        let left = pos.x <= screen.left() + RESIZE_MARGIN;
+        let right = pos.x >= screen.right() - RESIZE_MARGIN;
+        let top = pos.y <= screen.top() + RESIZE_MARGIN;
+        let bottom = pos.y >= screen.bottom() - RESIZE_MARGIN;
+
+        let dir = match (left, right, top, bottom) {
+            (true, _, true, _) => Some(ResizeDirection::NorthWest),
+            (_, true, true, _) => Some(ResizeDirection::NorthEast),
+            (true, _, _, true) => Some(ResizeDirection::SouthWest),
+            (_, true, _, true) => Some(ResizeDirection::SouthEast),
+            (true, _, _, _) => Some(ResizeDirection::West),
+            (_, true, _, _) => Some(ResizeDirection::East),
+            (_, _, true, _) => Some(ResizeDirection::North),
+            (_, _, _, true) => Some(ResizeDirection::South),
+            _ => None,
+        };
+
+        if let Some(d) = dir {
+            let cursor = match d {
+                ResizeDirection::North | ResizeDirection::South => CursorIcon::ResizeVertical,
+                ResizeDirection::East | ResizeDirection::West => CursorIcon::ResizeHorizontal,
+                ResizeDirection::NorthWest | ResizeDirection::SouthEast => CursorIcon::ResizeNwSe,
+                ResizeDirection::NorthEast | ResizeDirection::SouthWest => CursorIcon::ResizeNeSw,
+            };
+            ctx.set_cursor_icon(cursor);
+
+            if ctx.input(|i| i.pointer.primary_pressed()) {
+                ctx.send_viewport_cmd(ViewportCommand::BeginResize(d));
+            }
+        }
+    }
+
+    fn paint_orb_backdrop(&self, ui: &mut egui::Ui, rect: Rect) {
+        // Center Y in OpenGL bottom-up normalized coordinates [0..1]
+        // Shifts gently upward when the transcript drawer slides open
+        let center_y = 0.58 + self.drawer_anim * 0.16;
+        let orb_scale = (0.43 - self.drawer_anim * 0.11).clamp(0.24, 0.48);
+
+        let uniforms = OrbUniforms {
+            time: self.egui_time as f32,
+            orb_center: [0.5, center_y],
+            orb_scale,
+            audio: self.smooth_audio,
+            openness: self.smooth_openness,
+            width: self.smooth_width,
+            state_weights: self.state_weights,
+            mouse: self.smooth_mouse,
+            muted: self.smooth_muted,
+            pulse: self.click_pulse,
+        };
+
+        if let Some(renderer_arc) = &self.orb_renderer {
+            let renderer = Arc::clone(renderer_arc);
+            let cb = eframe::egui_glow::CallbackFn::new(move |info, painter| {
+                let vp = info.viewport_in_pixels();
+                if let Ok(r) = renderer.lock() {
+                    r.paint(
+                        painter.gl(),
+                        [vp.left_px as f32, vp.from_bottom_px as f32],
+                        [vp.width_px as f32, vp.height_px as f32],
+                        &uniforms,
+                    );
+                }
+            });
+
+            ui.painter().add(egui::PaintCallback {
+                rect,
+                callback: Arc::new(cb),
+            });
+        } else {
+            // Safe 2D fallback (using proper unmultiplied alpha)
+            self.paint_fallback_2d_orb(ui.painter(), rect, center_y, orb_scale);
+        }
+    }
+
+    fn paint_fallback_2d_orb(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        center_y_gl: f32,
+        orb_scale: f32,
+    ) {
+        painter.rect_filled(rect, CornerRadius::ZERO, BG_OBSIDIAN);
+        let center = Pos2::new(
+            rect.center().x,
+            rect.top() + (1.0 - center_y_gl) * rect.height(),
+        );
+        let r = rect.width().min(rect.height()) * orb_scale * 0.55;
+        let col = self.state_color();
+        for i in (1..=8).rev() {
+            let rad = r + i as f32 * 10.0;
+            let a = (24 - i * 2).max(2) as u8;
+            painter.circle_filled(
+                center,
+                rad,
+                Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), a),
+            );
+        }
+        painter.circle_filled(
+            center,
+            r,
+            Color32::from_rgba_unmultiplied(18, 14, 42, 235),
+        );
+        painter.circle_stroke(
+            center,
+            r,
+            Stroke::new(2.0_f32, Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 180)),
+        );
+    }
+
+    fn draw_frameless_header(&mut self, ui: &mut egui::Ui, screen: Rect) {
+        let header_rect = Rect::from_min_size(screen.left_top(), Vec2::new(screen.width(), HEADER_H));
+        let painter = ui.painter();
+
+        // Ultra-subtle frosted header wash + bottom hairline
+        painter.rect_filled(
+            header_rect,
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(7, 6, 18, 95),
+        );
+        painter.line_segment(
+            [header_rect.left_bottom(), header_rect.right_bottom()],
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 14)),
+        );
+
+        let controls_w = 108.0;
+        let drag_rect = Rect::from_min_max(
+            Pos2::new(header_rect.left() + RESIZE_MARGIN, header_rect.top() + RESIZE_MARGIN),
+            Pos2::new(header_rect.right() - controls_w, header_rect.bottom()),
+        );
+        let drag_resp = ui.interact(drag_rect, ui.id().with("titlebar_drag"), Sense::click_and_drag());
+        if drag_resp.drag_started_by(egui::PointerButton::Primary) {
+            ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+        }
+        if drag_resp.double_clicked() {
+            let is_max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+            ui.ctx()
+                .send_viewport_cmd(ViewportCommand::Maximized(!is_max));
+        }
+
+        // Left: Brand mark + BOOGIE + Status Pill
+        let state_col = self.state_color();
+        let pulse_alpha =
+            (150.0 + 105.0 * (self.egui_time as f32 * 3.0).sin().abs()) as u8;
+
+        let brand_x = header_rect.left() + 16.0;
+        let cy = header_rect.center().y;
+
+        // Mini glowing brand dot/ring
+        painter.circle_filled(
+            Pos2::new(brand_x + 5.0, cy),
+            7.5,
+            Color32::from_rgba_unmultiplied(VIOLET.r(), VIOLET.g(), VIOLET.b(), 40),
+        );
+        painter.circle_stroke(
+            Pos2::new(brand_x + 5.0, cy),
+            5.0,
+            Stroke::new(1.3_f32, Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 210)),
+        );
+        painter.circle_filled(
+            Pos2::new(brand_x + 5.0, cy),
+            2.2,
+            Color32::from_rgba_unmultiplied(230, 245, 255, 235),
+        );
+
+        painter.text(
+            Pos2::new(brand_x + 18.0, cy),
+            Align2::LEFT_CENTER,
+            "BOOGIE",
+            FontId::new(12.0, FontFamily::Proportional),
+            TEXT_BRIGHT,
+        );
+
+        // Status pill
+        let pill_x = brand_x + 76.0;
+        let label = self.state_label();
+        let pill_w = 18.0 + label.len() as f32 * 6.4 + 12.0;
+        let pill_rect = Rect::from_center_size(
+            Pos2::new(pill_x + pill_w * 0.5, cy),
+            Vec2::new(pill_w, 20.0),
+        );
+        painter.rect_filled(
+            pill_rect,
+            CornerRadius::same(10),
+            Color32::from_rgba_unmultiplied(state_col.r(), state_col.g(), state_col.b(), 26),
+        );
+        painter.rect_stroke(
+            pill_rect,
+            CornerRadius::same(10),
+            Stroke::new(
+                1.0_f32,
+                Color32::from_rgba_unmultiplied(state_col.r(), state_col.g(), state_col.b(), 72),
+            ),
+            egui::StrokeKind::Inside,
+        );
+        // Pulsing status dot
+        let dot_pos = Pos2::new(pill_rect.left() + 10.0, cy);
+        painter.circle_filled(
+            dot_pos,
+            5.0,
+            Color32::from_rgba_unmultiplied(state_col.r(), state_col.g(), state_col.b(), 48),
+        );
+        painter.circle_filled(
+            dot_pos,
+            2.6,
+            Color32::from_rgba_unmultiplied(state_col.r(), state_col.g(), state_col.b(), pulse_alpha),
+        );
+        painter.text(
+            Pos2::new(pill_rect.left() + 18.5, cy),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::new(9.5, FontFamily::Monospace),
+            Color32::from_rgba_unmultiplied(state_col.r(), state_col.g(), state_col.b(), 235),
+        );
+
+        // Right: Telemetry (only show if window wide enough) + Window Control Buttons
+        if screen.width() >= 430.0 {
+            let telemetry = format!(
+                "{:.0}% · {:.1}G",
+                self.metrics.cpu, self.metrics.mem_used_gb
+            );
+            painter.text(
+                Pos2::new(header_rect.right() - controls_w - 8.0, cy),
+                Align2::RIGHT_CENTER,
+                telemetry,
+                FontId::new(10.0, FontFamily::Monospace),
+                Color32::from_rgba_unmultiplied(TEXT_MUTED.r(), TEXT_MUTED.g(), TEXT_MUTED.b(), 180),
+            );
+        }
+
+        // Custom crisp vector window buttons (Min, Max, Close)
+        let btn_size = Vec2::new(32.0, 26.0);
+        let right_edge = header_rect.right() - 8.0;
+
+        let close_rect = Rect::from_center_size(Pos2::new(right_edge - 16.0, cy), btn_size);
+        let max_rect = Rect::from_center_size(Pos2::new(right_edge - 50.0, cy), btn_size);
+        let min_rect = Rect::from_center_size(Pos2::new(right_edge - 84.0, cy), btn_size);
+
+        if draw_win_button(ui, min_rect, "win_min", WinBtnKind::Minimize) {
+            ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
+        }
+        let is_max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+        if draw_win_button(ui, max_rect, "win_max", WinBtnKind::Maximize(is_max)) {
+            ui.ctx()
+                .send_viewport_cmd(ViewportCommand::Maximized(!is_max));
+        }
+        if draw_win_button(ui, close_rect, "win_close", WinBtnKind::Close) {
+            ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+        }
+    }
+
+    fn draw_live_captions(&mut self, ui: &mut egui::Ui, screen: Rect, dock_top: f32) {
+        if self.drawer_anim > 0.65 || self.entries.is_empty() {
+            return;
+        }
+        let visibility = (1.0 - self.drawer_anim * 1.6).clamp(0.0, 1.0);
+        let now = self.egui_time;
+
+        // Show up to 3 most recent non-expired items cleanly centered above the dock
+        let mut recent: Vec<&ChatEntry> = self
+            .entries
+            .iter()
+            .rev()
+            .filter(|e| e.kind != LogKind::System || (now - e.updated_at) < 4.5)
+            .take(3)
+            .collect();
+        recent.reverse();
+
+        if recent.is_empty() {
+            return;
+        }
+
+        let max_w = (screen.width() - 56.0).clamp(240.0, 620.0);
+        let caption_area = Rect::from_min_max(
+            Pos2::new(screen.center().x - max_w * 0.5, dock_top - 135.0),
+            Pos2::new(screen.center().x + max_w * 0.5, dock_top - 14.0),
+        );
+
+        let mut cursor_y = caption_area.bottom();
+        let painter = ui.painter();
+
+        for entry in recent.iter().rev() {
+            let age = now - entry.updated_at;
+            let fade = if age < CAPTION_FADE_START {
+                1.0_f32
+            } else if age < CAPTION_FADE_END {
+                1.0 - ((age - CAPTION_FADE_START) / (CAPTION_FADE_END - CAPTION_FADE_START)) as f32
+            } else {
+                0.0
+            };
+            let alpha = fade * visibility;
+            if alpha < 0.02 {
+                continue;
+            }
+
+            match entry.kind {
+                LogKind::Tool => {
+                    let chip_text = if entry.body.is_empty() {
+                        format!("⚡ {}", entry.title)
+                    } else {
+                        format!("⚡ {} · {}", entry.title, truncate_str(&entry.body, 42))
+                    };
+                    let galley = ui.fonts(|f| {
+                        f.layout_no_wrap(
+                            chip_text,
+                            FontId::new(11.0, FontFamily::Proportional),
+                            Color32::from_rgba_unmultiplied(
+                                AMBER.r(),
+                                AMBER.g(),
+                                AMBER.b(),
+                                (alpha * 235.0) as u8,
+                            ),
+                        )
+                    });
+                    let pill_size = galley.rect.size() + Vec2::new(22.0, 10.0);
+                    let pill_rect = Rect::from_center_size(
+                        Pos2::new(screen.center().x, cursor_y - pill_size.y * 0.5),
+                        pill_size,
+                    );
+                    painter.rect_filled(
+                        pill_rect,
+                        CornerRadius::same(12),
+                        Color32::from_rgba_unmultiplied(24, 18, 36, (alpha * 185.0) as u8),
+                    );
+                    painter.rect_stroke(
+                        pill_rect,
+                        CornerRadius::same(12),
+                        Stroke::new(
+                            1.0_f32,
+                            Color32::from_rgba_unmultiplied(
+                                AMBER.r(),
+                                AMBER.g(),
+                                AMBER.b(),
+                                (alpha * 80.0) as u8,
+                            ),
+                        ),
+                        egui::StrokeKind::Inside,
+                    );
+                    painter.galley(
+                        pill_rect.center() - galley.rect.size() * 0.5,
+                        galley,
+                        Color32::TRANSPARENT,
+                    );
+                    cursor_y -= pill_size.y + 8.0;
+                }
+                LogKind::Boogie | LogKind::User | LogKind::System => {
+                    let (font_sz, base_col, prefix) = match entry.kind {
+                        LogKind::Boogie => (15.0, TEXT_BRIGHT, ""),
+                        LogKind::User => (12.5, Color32::from_rgb(196, 178, 255), "You: "),
+                        LogKind::System => (11.0, TEXT_MUTED, ""),
+                        LogKind::Tool => unreachable!(),
+                    };
+                    let display = format!("{prefix}{}", truncate_tail(&entry.body, 150));
+                    let col = Color32::from_rgba_unmultiplied(
+                        base_col.r(),
+                        base_col.g(),
+                        base_col.b(),
+                        (alpha * 245.0) as u8,
+                    );
+                    let galley = ui.fonts(|f| {
+                        f.layout(
+                            display,
+                            FontId::new(font_sz, FontFamily::Proportional),
+                            col,
+                            max_w - 24.0,
+                        )
+                    });
+                    let h = galley.rect.height();
+                    let text_pos = Pos2::new(
+                        screen.center().x - galley.rect.width() * 0.5,
+                        cursor_y - h,
+                    );
+                    // Subtle shadow pill behind bright captions for effortless legibility
+                    let bg_rect = Rect::from_min_size(text_pos, galley.rect.size())
+                        .expand2(Vec2::new(12.0, 4.0));
+                    painter.rect_filled(
+                        bg_rect,
+                        CornerRadius::same(10),
+                        Color32::from_rgba_unmultiplied(6, 5, 16, (alpha * 115.0) as u8),
+                    );
+                    painter.galley(text_pos, galley, Color32::TRANSPARENT);
+                    cursor_y -= h + 12.0;
+                }
+            }
+
+            if cursor_y < caption_area.top() {
+                break;
+            }
+        }
+
+        // Clicking the caption area smoothly opens the full transcript drawer
+        let resp = ui.interact(caption_area, ui.id().with("caption_click"), Sense::click());
+        if resp.clicked() {
+            self.drawer_open = true;
+            self.scroll_to_bottom = true;
+        }
+    }
+
+    fn draw_transcript_drawer(&mut self, ui: &mut egui::Ui, screen: Rect, dock_top: f32) {
+        if self.drawer_anim < 0.02 {
+            return;
+        }
+
+        let target_h = (screen.height() * 0.44).clamp(180.0, 380.0);
+        let current_h = target_h * self.drawer_anim;
+        let side_pad = ((screen.width() - 680.0) * 0.5).max(16.0);
+        let drawer_rect = Rect::from_min_max(
+            Pos2::new(screen.left() + side_pad, dock_top - current_h - 12.0),
+            Pos2::new(screen.right() - side_pad, dock_top - 12.0),
+        );
+
+        let a = self.drawer_anim;
+        let painter = ui.painter();
+
+        // Frosted obsidian glass sheet
+        painter.rect_filled(
+            drawer_rect,
+            CornerRadius::same(18),
+            Color32::from_rgba_unmultiplied(11, 10, 26, (a * 224.0) as u8),
+        );
+        painter.rect_stroke(
+            drawer_rect,
+            CornerRadius::same(18),
+            Stroke::new(
+                1.0_f32,
+                Color32::from_rgba_unmultiplied(178, 168, 255, (a * 42.0) as u8),
+            ),
+            egui::StrokeKind::Inside,
+        );
+        // Subtle top glass specular highlight
+        painter.line_segment(
+            [
+                Pos2::new(drawer_rect.left() + 24.0, drawer_rect.top() + 1.0),
+                Pos2::new(drawer_rect.right() - 24.0, drawer_rect.top() + 1.0),
+            ],
+            Stroke::new(
+                1.0_f32,
+                Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), (a * 55.0) as u8),
+            ),
+        );
+
+        if self.drawer_anim < 0.35 {
+            return;
+        }
+
+        // Drawer mini header
+        let bar_rect = Rect::from_min_size(drawer_rect.left_top(), Vec2::new(drawer_rect.width(), 32.0));
+        painter.text(
+            Pos2::new(bar_rect.left() + 16.0, bar_rect.center().y),
+            Align2::LEFT_CENTER,
+            "CONVERSATION",
+            FontId::new(10.0, FontFamily::Monospace),
+            Color32::from_rgba_unmultiplied(TEXT_MUTED.r(), TEXT_MUTED.g(), TEXT_MUTED.b(), (a * 220.0) as u8),
+        );
+
+        let close_pill = Rect::from_center_size(
+            Pos2::new(bar_rect.right() - 22.0, bar_rect.center().y),
+            Vec2::new(22.0, 22.0),
+        );
+        let close_resp = ui.interact(close_pill, ui.id().with("drawer_close"), Sense::click());
+        if close_resp.hovered() {
+            painter.circle_filled(
+                close_pill.center(),
+                10.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+            );
+        }
+        let cx = close_pill.center();
+        let xcol = if close_resp.hovered() { TEXT_BRIGHT } else { TEXT_MUTED };
+        painter.line_segment([cx + Vec2::new(-3.5, -1.5), cx + Vec2::new(0.0, 2.0)], Stroke::new(1.4_f32, xcol));
+        painter.line_segment([cx + Vec2::new(0.0, 2.0), cx + Vec2::new(3.5, -1.5)], Stroke::new(1.4_f32, xcol));
+        if close_resp.clicked() {
+            self.drawer_open = false;
+        }
+
+        // Scrollable chat bubbles inside drawer
+        let content_rect = Rect::from_min_max(
+            Pos2::new(drawer_rect.left() + 12.0, bar_rect.bottom() + 2.0),
+            Pos2::new(drawer_rect.right() - 10.0, drawer_rect.bottom() - 10.0),
+        );
+
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
+        let mut scroll = egui::ScrollArea::vertical()
+            .id_salt("boogie_transcript_scroll")
+            .auto_shrink([false; 2])
+            .stick_to_bottom(true);
+
+        if self.scroll_to_bottom {
+            scroll = scroll.scroll_offset(Vec2::new(0.0, f32::MAX));
+            self.scroll_to_bottom = false;
+        }
+
+        scroll.show(&mut child, |ui| {
+            ui.set_min_width(ui.available_width());
+
+            if self.entries.is_empty() {
+                ui.add_space(28.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new("Say anything to Boogie — transcripts appear here.")
+                            .size(12.5)
+                            .color(TEXT_MUTED),
+                    );
+                });
+                return;
+            }
+
+            let max_bubble_w = (ui.available_width() * 0.82).max(180.0);
+
+            for entry in &self.entries {
+                match entry.kind {
+                    LogKind::User => {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            egui::Frame::new()
+                                .fill(Color32::from_rgba_unmultiplied(110, 74, 224, 52))
+                                .stroke(Stroke::new(
+                                    1.0_f32,
+                                    Color32::from_rgba_unmultiplied(160, 128, 255, 72),
+                                ))
+                                .corner_radius(CornerRadius {
+                                    nw: 14,
+                                    ne: 14,
+                                    sw: 14,
+                                    se: 4,
+                                })
+                                .inner_margin(egui::Margin::symmetric(12, 8))
+                                .show(ui, |ui| {
+                                    ui.set_max_width(max_bubble_w);
+                                    ui.label(
+                                        RichText::new(&entry.body)
+                                            .size(13.0)
+                                            .color(TEXT_BRIGHT),
+                                    );
+                                });
+                        });
+                    }
+                    LogKind::Boogie => {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                            egui::Frame::new()
+                                .fill(Color32::from_rgba_unmultiplied(22, 24, 48, 175))
+                                .stroke(Stroke::new(
+                                    1.0_f32,
+                                    Color32::from_rgba_unmultiplied(38, 224, 245, 45),
+                                ))
+                                .corner_radius(CornerRadius {
+                                    nw: 4,
+                                    ne: 14,
+                                    sw: 14,
+                                    se: 14,
+                                })
+                                .inner_margin(egui::Margin::symmetric(12, 8))
+                                .show(ui, |ui| {
+                                    ui.set_max_width(max_bubble_w);
+                                    ui.label(
+                                        RichText::new(&entry.body)
+                                            .size(13.0)
+                                            .color(TEXT_BRIGHT),
+                                    );
+                                });
+                        });
+                    }
+                    LogKind::Tool => {
+                        ui.horizontal_wrapped(|ui| {
+                            egui::Frame::new()
+                                .fill(Color32::from_rgba_unmultiplied(255, 162, 72, 22))
+                                .stroke(Stroke::new(
+                                    1.0_f32,
+                                    Color32::from_rgba_unmultiplied(255, 162, 72, 65),
+                                ))
+                                .corner_radius(CornerRadius::same(10))
+                                .inner_margin(egui::Margin::symmetric(9, 4))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(format!("⚡ {}", entry.title))
+                                            .size(11.0)
+                                            .color(AMBER)
+                                            .strong(),
+                                    );
+                                    if !entry.body.is_empty() {
+                                        ui.label(
+                                            RichText::new(format!("· {}", entry.body))
+                                                .size(11.0)
+                                                .color(TEXT_SOFT),
+                                        );
+                                    }
+                                });
+                        });
+                    }
+                    LogKind::System => {
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                RichText::new(&entry.body)
+                                    .size(10.5)
+                                    .color(TEXT_MUTED)
+                                    .family(FontFamily::Monospace),
+                            );
+                        });
+                    }
+                }
+                ui.add_space(6.0);
+            }
+        });
+    }
+
+    fn draw_floating_dock(&mut self, ui: &mut egui::Ui, screen: Rect) -> f32 {
+        let dock_w = 304.0_f32.min(screen.width() - 32.0);
+        let dock_h = 54.0_f32;
+        let dock_rect = Rect::from_center_size(
+            Pos2::new(screen.center().x, screen.bottom() - 18.0 - dock_h * 0.5),
+            Vec2::new(dock_w, dock_h),
+        );
+
+        let painter = ui.painter();
+
+        // Soft drop glow under dock
+        painter.rect_filled(
+            dock_rect.expand(4.0),
+            CornerRadius::same(30),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 95),
+        );
+        // Frosted glass pill container
+        painter.rect_filled(
+            dock_rect,
+            CornerRadius::same(27),
+            Color32::from_rgba_unmultiplied(14, 13, 30, 212),
+        );
+        painter.rect_stroke(
+            dock_rect,
+            CornerRadius::same(27),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(180, 170, 255, 42)),
+            egui::StrokeKind::Inside,
+        );
+        // Crisp specular top highlight line
+        painter.line_segment(
+            [
+                Pos2::new(dock_rect.left() + 28.0, dock_rect.top() + 1.0),
+                Pos2::new(dock_rect.right() - 28.0, dock_rect.top() + 1.0),
+            ],
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 28)),
+        );
+
+        let cy = dock_rect.center().y;
+
+        // 1. Mic Toggle Button (left)
+        let mic_center = Pos2::new(dock_rect.left() + 30.0, cy);
+        let mic_rect = Rect::from_center_size(mic_center, Vec2::splat(38.0));
+        let mic_resp = ui
+            .interact(mic_rect, ui.id().with("dock_mic"), Sense::click())
+            .on_hover_text(if self.muted { "Unmute microphone" } else { "Mute microphone" });
+
+        let mic_col = if self.muted { CRIMSON } else { CYAN };
+        let mic_fill_a = if mic_resp.hovered() { 58 } else { 32 };
+        painter.circle_filled(
+            mic_center,
+            19.0,
+            Color32::from_rgba_unmultiplied(mic_col.r(), mic_col.g(), mic_col.b(), mic_fill_a),
+        );
+        painter.circle_stroke(
+            mic_center,
+            19.0,
+            Stroke::new(
+                1.1_f32,
+                Color32::from_rgba_unmultiplied(mic_col.r(), mic_col.g(), mic_col.b(), 110),
+            ),
+        );
+        draw_mic_icon(painter, mic_center, mic_col, self.muted);
+
+        if mic_resp.clicked() {
+            self.muted = !self.muted;
+            self.click_pulse = 0.55;
+            if let Ok(mut s) = self.shared.try_lock() {
+                s.muted = self.muted;
+            }
+        }
+
+        // 2. Live 14-Bar Spectrum Visualizer (center)
+        let spec_left = dock_rect.left() + 64.0;
+        let spec_right = dock_rect.right() - 102.0;
+        let spec_w = (spec_right - spec_left).max(40.0);
+        let step = spec_w / NUM_SPEC_BARS as f32;
+        let bar_w = (step * 0.46).clamp(2.2, 4.0);
+        let max_bar_h = 26.0_f32;
+
+        for (i, &val) in self.spec_bars.iter().enumerate() {
+            let x = spec_left + (i as f32 + 0.5) * step;
+            let h = (val * max_bar_h).clamp(3.0, max_bar_h);
+            let frac = i as f32 / (NUM_SPEC_BARS - 1) as f32;
+            let base = if self.muted {
+                Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 95)
+            } else {
+                let c = match self.state {
+                    AppState::Speaking => lerp_color(CYAN, MINT, frac),
+                    AppState::Thinking => lerp_color(VIOLET, AMBER, frac),
+                    _ => lerp_color(VIOLET, CYAN, frac),
+                };
+                Color32::from_rgba_unmultiplied(
+                    c.r(),
+                    c.g(),
+                    c.b(),
+                    (120.0 + val * 135.0).min(255.0) as u8,
+                )
+            };
+
+            let r = Rect::from_center_size(Pos2::new(x, cy), Vec2::new(bar_w, h));
+            painter.rect_filled(r, CornerRadius::same(2), base);
+        }
+
+        // 3. Interrupt / Stop Button
+        let stop_center = Pos2::new(dock_rect.right() - 72.0, cy);
+        let stop_rect = Rect::from_center_size(stop_center, Vec2::splat(34.0));
+        let stop_resp = ui
+            .interact(stop_rect, ui.id().with("dock_stop"), Sense::click())
+            .on_hover_text("Interrupt / Stop speaking");
+
+        let is_speaking = self.state == AppState::Speaking;
+        let stop_fill_a = if stop_resp.hovered() {
+            52
+        } else if is_speaking {
+            34
+        } else {
+            16
+        };
+        let stop_col = if stop_resp.hovered() || is_speaking {
+            CRIMSON
+        } else {
+            TEXT_SOFT
+        };
+        painter.circle_filled(
+            stop_center,
+            17.0,
+            Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), stop_fill_a),
+        );
+        painter.circle_stroke(
+            stop_center,
+            17.0,
+            Stroke::new(
+                1.0_f32,
+                Color32::from_rgba_unmultiplied(
+                    stop_col.r(),
+                    stop_col.g(),
+                    stop_col.b(),
+                    if is_speaking || stop_resp.hovered() { 115 } else { 36 },
+                ),
+            ),
+        );
+        painter.rect_filled(
+            Rect::from_center_size(stop_center, Vec2::splat(9.5)),
+            CornerRadius::same(2),
+            stop_col,
+        );
+
+        if stop_resp.clicked() {
+            self.click_pulse = 0.7;
+            self.viseme_queue.clear();
+            let _ = self.interrupt_tx.try_send(());
+        }
+
+        // 4. Transcript Drawer Toggle Button (right)
+        let chat_center = Pos2::new(dock_rect.right() - 30.0, cy);
+        let chat_rect = Rect::from_center_size(chat_center, Vec2::splat(34.0));
+        let chat_resp = ui
+            .interact(chat_rect, ui.id().with("dock_history"), Sense::click())
+            .on_hover_text(if self.drawer_open {
+                "Hide conversation"
+            } else {
+                "Show conversation"
+            });
+
+        let chat_col = if self.drawer_open {
+            CYAN
+        } else if chat_resp.hovered() {
+            TEXT_BRIGHT
+        } else {
+            TEXT_SOFT
+        };
+        let chat_bg = if self.drawer_open {
+            Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 38)
+        } else if chat_resp.hovered() {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 20)
+        } else {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 8)
+        };
+        painter.circle_filled(chat_center, 17.0, chat_bg);
+        painter.circle_stroke(
+            chat_center,
+            17.0,
+            Stroke::new(
+                1.0_f32,
+                Color32::from_rgba_unmultiplied(
+                    chat_col.r(),
+                    chat_col.g(),
+                    chat_col.b(),
+                    if self.drawer_open { 110 } else { 38 },
+                ),
+            ),
+        );
+        draw_transcript_icon(painter, chat_center, chat_col);
+
+        // Tiny glowing unread badge if conversation has messages and drawer is closed
+        if !self.drawer_open && !self.entries.is_empty() {
+            painter.circle_filled(chat_center + Vec2::new(9.5, -9.5), 3.0, VIOLET);
+        }
+
+        if chat_resp.clicked() {
+            self.drawer_open = !self.drawer_open;
+            if self.drawer_open {
+                self.scroll_to_bottom = true;
+            }
+        }
+
+        dock_rect.top()
+    }
+
+    fn draw_confirm_dialog(&mut self, ctx: &egui::Context) {
+        let pending = match &self.confirm_pending {
+            Some(c) => c.clone(),
+            None => return,
+        };
+
+        // Dim scrim over entire window
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("confirm_scrim"))
+            .fixed_pos(screen.left_top())
+            .order(Order::Middle)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(
+                    screen,
+                    CornerRadius::ZERO,
+                    Color32::from_rgba_unmultiplied(4, 3, 12, 170),
+                );
+                ui.allocate_rect(screen, Sense::click());
+            });
+
+        let mut response = None;
+
+        egui::Window::new("confirm_action")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .order(Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(15, 13, 32, 244))
+                    .stroke(Stroke::new(
+                        1.0_f32,
+                        Color32::from_rgba_unmultiplied(AMBER.r(), AMBER.g(), AMBER.b(), 120),
+                    ))
+                    .corner_radius(CornerRadius::same(18))
+                    .inner_margin(egui::Margin::same(22)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(280.0);
+                ui.set_max_width(360.0);
+
+                ui.label(
+                    RichText::new("CONFIRMATION REQUIRED")
+                        .size(10.0)
+                        .color(AMBER)
+                        .family(FontFamily::Monospace),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(&pending.title)
+                        .size(15.5)
+                        .color(TEXT_BRIGHT)
+                        .strong(),
+                );
+                if !pending.detail.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(&pending.detail)
+                            .size(12.0)
+                            .color(TEXT_SOFT),
+                    );
+                }
+
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Approve")
+                                    .size(12.5)
+                                    .color(BG_OBSIDIAN)
+                                    .strong(),
+                            )
+                            .fill(MINT)
+                            .corner_radius(CornerRadius::same(14))
+                            .min_size(Vec2::new(104.0, 34.0)),
+                        )
+                        .clicked()
+                    {
+                        response = Some(ConfirmResponse::Confirmed);
+                    }
+                    ui.add_space(10.0);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Deny")
+                                    .size(12.5)
+                                    .color(CRIMSON)
+                                    .strong(),
+                            )
+                            .fill(Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 26))
+                            .stroke(Stroke::new(
+                                1.0_f32,
+                                Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 95),
+                            ))
+                            .corner_radius(CornerRadius::same(14))
+                            .min_size(Vec2::new(96.0, 34.0)),
+                        )
+                        .clicked()
+                    {
+                        response = Some(ConfirmResponse::Denied);
+                    }
+                });
+            });
+
+        if let Some(resp) = response {
+            let _ = self.confirm_tx.try_send(resp);
+            self.confirm_pending = None;
+        }
+    }
+}
+
+impl eframe::App for BoogieGui {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let now = ctx.input(|i| i.time);
+        let dt = if self.last_frame_time > 0.0 {
+            (now - self.last_frame_time).clamp(0.001, 0.05) as f32
+        } else {
+            0.016
+        };
+        self.last_frame_time = now;
+        self.egui_time = now;
+
+        self.process_events();
+        self.metrics.refresh();
+        self.update_animations(ctx, dt);
+
+        // Smooth 60fps loop for fluid 3D liquid glass animation
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+
+        let screen = ctx.screen_rect();
+        self.handle_frameless_resize(ctx, screen);
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(BG_OBSIDIAN))
+            .show(ctx, |ui| {
+                let full_rect = ui.max_rect();
+
+                // 1. Full-canvas 3D Liquid Glass Orb + Obsidian Aurora Shader
+                self.paint_orb_backdrop(ui, full_rect);
+
+                // 2. Floating Glass Control Dock (bottom)
+                let dock_top = self.draw_floating_dock(ui, full_rect);
+
+                // 3. Live Captions (when drawer closed) + Expandable Glass Transcript Drawer
+                self.draw_live_captions(ui, full_rect, dock_top);
+                self.draw_transcript_drawer(ui, full_rect, dock_top);
+
+                // 4. Frameless Custom Header Bar (top)
+                self.draw_frameless_header(ui, full_rect);
+
+                // 5. Interactive poke/ripple on the 3D orb region (safely bounded between header & lower panels)
+                let orb_hit_y = full_rect.top()
+                    + (1.0 - (0.58 + self.drawer_anim * 0.16)) * full_rect.height();
+                let orb_hit_r = (full_rect.width().min(full_rect.height()) * (0.20 - self.drawer_anim * 0.05))
+                    .max(40.0);
+                let lower_limit = if self.drawer_open {
+                    dock_top - (full_rect.height() * 0.44).clamp(180.0, 380.0) - 18.0
+                } else {
+                    dock_top - 140.0
+                };
+                let orb_hit_rect = Rect::from_center_size(
+                    Pos2::new(full_rect.center().x, orb_hit_y),
+                    Vec2::splat(orb_hit_r * 2.0),
+                )
+                .intersect(Rect::from_min_max(
+                    Pos2::new(full_rect.left(), full_rect.top() + HEADER_H + 4.0),
+                    Pos2::new(full_rect.right(), lower_limit.max(full_rect.top() + HEADER_H + 40.0)),
+                ));
+                if orb_hit_rect.is_positive() {
+                    let orb_resp = ui.interact(orb_hit_rect, ui.id().with("orb_poke"), Sense::click());
+                    if orb_resp.clicked() {
+                        self.click_pulse = 1.0;
+                    }
+                }
+
+                // 6. Crisp 1px outer obsidian glass rim
+                ui.painter().rect_stroke(
+                    full_rect,
+                    CornerRadius::ZERO,
+                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(190, 180, 255, 26)),
+                    egui::StrokeKind::Inside,
+                );
+            });
+
+        // 6. Modal Confirmation Card (if pending)
+        self.draw_confirm_dialog(ctx);
+    }
+
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        if let (Some(gl), Some(renderer_arc)) = (gl, &self.orb_renderer) {
+            if let Ok(r) = renderer_arc.lock() {
+                r.destroy(gl);
+            }
+        }
+    }
+}
+
+// --- Custom Vector Icon Painters ---
+
+enum WinBtnKind {
+    Minimize,
+    Maximize(bool),
+    Close,
+}
+
+fn draw_win_button(ui: &mut egui::Ui, rect: Rect, id: &str, kind: WinBtnKind) -> bool {
+    let resp = ui.interact(rect, ui.id().with(id), Sense::click());
+    let painter = ui.painter();
+
+    if resp.hovered() {
+        let hover_bg = match kind {
+            WinBtnKind::Close => Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 190),
+            _ => Color32::from_rgba_unmultiplied(255, 255, 255, 22),
+        };
+        painter.rect_filled(rect, CornerRadius::same(7), hover_bg);
+    }
+
+    let c = rect.center();
+    let fg = if resp.hovered() { TEXT_BRIGHT } else { TEXT_SOFT };
+    let stroke = Stroke::new(1.3_f32, fg);
+
+    match kind {
+        WinBtnKind::Minimize => {
+            painter.line_segment([c + Vec2::new(-5.0, 0.5), c + Vec2::new(5.0, 0.5)], stroke);
+        }
+        WinBtnKind::Maximize(is_max) => {
+            if is_max {
+                let back = Rect::from_center_size(c + Vec2::new(1.5, -1.5), Vec2::splat(7.5));
+                let front = Rect::from_center_size(c + Vec2::new(-1.5, 1.5), Vec2::splat(7.5));
+                painter.rect_stroke(back, CornerRadius::same(1), stroke, egui::StrokeKind::Inside);
+                painter.rect_filled(front, CornerRadius::same(1), BG_OBSIDIAN);
+                painter.rect_stroke(front, CornerRadius::same(1), stroke, egui::StrokeKind::Inside);
+            } else {
+                let sq = Rect::from_center_size(c, Vec2::splat(8.5));
+                painter.rect_stroke(sq, CornerRadius::same(1), stroke, egui::StrokeKind::Inside);
+            }
+        }
+        WinBtnKind::Close => {
+            painter.line_segment([c + Vec2::new(-4.2, -4.2), c + Vec2::new(4.2, 4.2)], stroke);
+            painter.line_segment([c + Vec2::new(4.2, -4.2), c + Vec2::new(-4.2, 4.2)], stroke);
+        }
+    }
+
+    resp.clicked()
+}
+
+fn draw_mic_icon(painter: &egui::Painter, c: Pos2, col: Color32, muted: bool) {
+    let s = Stroke::new(1.5_f32, col);
+    // Capsule body
+    let cap = Rect::from_center_size(c + Vec2::new(0.0, -2.5), Vec2::new(6.5, 10.5));
+    painter.rect_stroke(cap, CornerRadius::same(3), s, egui::StrokeKind::Inside);
+    // U-arc cradle (approximated smoothly)
+    let mut arc = Vec::with_capacity(11);
+    for i in 0..=10 {
+        let a = std::f32::consts::PI * (i as f32 / 10.0);
+        arc.push(Pos2::new(c.x + a.cos() * 6.2, c.y - 1.5 + a.sin() * 6.0));
+    }
+    painter.add(egui::Shape::line(arc, s));
+    // Stem + base
+    painter.line_segment([Pos2::new(c.x, c.y + 4.5), Pos2::new(c.x, c.y + 8.0)], s);
+    painter.line_segment(
+        [Pos2::new(c.x - 3.8, c.y + 8.0), Pos2::new(c.x + 3.8, c.y + 8.0)],
+        s,
+    );
+    if muted {
+        painter.line_segment(
+            [c + Vec2::new(-7.5, -7.5), c + Vec2::new(7.5, 7.5)],
+            Stroke::new(1.8_f32, CRIMSON),
+        );
+    }
+}
+
+fn draw_transcript_icon(painter: &egui::Painter, c: Pos2, col: Color32) {
+    let s = Stroke::new(1.4_f32, col);
+    painter.line_segment([c + Vec2::new(-6.0, -4.0), c + Vec2::new(6.0, -4.0)], s);
+    painter.line_segment([c + Vec2::new(-6.0, 0.0), c + Vec2::new(6.0, 0.0)], s);
+    painter.line_segment([c + Vec2::new(-6.0, 4.0), c + Vec2::new(2.0, 4.0)], s);
+}
+
+// --- Helpers ---
+
+fn exp_lerp(current: f32, target: f32, speed: f32, dt: f32) -> f32 {
+    let factor = 1.0 - (-speed * dt).exp();
+    current + (target - current) * factor
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    Color32::from_rgb(
+        (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t) as u8,
+        (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t) as u8,
+        (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t) as u8,
+    )
+}
+
+fn append_transcript_chunk(target: &mut String, chunk: &str) {
+    if target.is_empty() {
+        target.push_str(chunk);
+        return;
+    }
+    let starts_punct = chunk
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '.' | ',' | '!' | '?' | ':' | ';' | '\'' | '’' | ')'));
+    if !starts_punct && !target.ends_with(' ') && !target.ends_with('\n') {
+        target.push(' ');
+    }
+    target.push_str(chunk);
+}
+
+/// Turns raw debug strings like `computer_settings Object {"action": String("brightness_down")}`
+/// into a sleek readable badge: `("Computer Settings", "brightness down")`.
+fn format_tool_log(raw: &str) -> (String, String) {
+    let (name_part, args_part) = match raw.split_once(' ') {
+        Some((n, a)) => (n.trim(), a.trim()),
+        None => (raw.trim(), ""),
+    };
+
+    let nice_name = name_part
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Extract clean values from serde_json Debug output `String("...")`
+    let mut values = Vec::new();
+    let mut rest = args_part;
+    while let Some(idx) = rest.find("String(\"") {
+        let after = &rest[idx + 8..];
+        if let Some(end) = after.find("\")") {
+            let val = after[..end].replace('_', " ");
+            if !val.is_empty() {
+                values.push(val);
+            }
+            rest = &after[end + 2..];
+        } else {
+            break;
+        }
+    }
+
+    let detail = if !values.is_empty() {
+        truncate_str(&values.join(" · "), 64)
+    } else if args_part == "Object {}" || args_part == "{}" || args_part.is_empty() {
+        String::new()
+    } else {
+        truncate_str(args_part, 56)
+    };
+
+    (nice_name, detail)
+}
+
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        s.to_string()
+    } else {
+        let end = s
+            .char_indices()
+            .nth(max_chars.saturating_sub(1))
+            .map(|(i, _)| i)
+            .unwrap_or(s.len());
+        format!("{}…", &s[..end])
+    }
+}
+
+fn truncate_tail(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        s.to_string()
+    } else {
+        let skip = count.saturating_sub(max_chars.saturating_sub(1));
+        let start = s
+            .char_indices()
+            .nth(skip)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        format!("…{}", s[start..].trim_start())
+    }
+}
+
+fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+
+    // Load crisp Windows system fonts (also unlocks full Vietnamese glyph support!)
+    let sans_candidates = [
+        r"C:\Windows\Fonts\segoeui.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
+    ];
+    for path in sans_candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts
+                .font_data
+                .insert("ui_sans".to_owned(), Arc::new(FontData::from_owned(bytes)));
+            fonts
+                .families
+                .entry(FontFamily::Proportional)
+                .or_default()
+                .insert(0, "ui_sans".to_owned());
+            break;
+        }
+    }
+
+    let mono_candidates = [
+        r"C:\Windows\Fonts\CascadiaMono.ttf",
+        r"C:\Windows\Fonts\consola.ttf",
+    ];
+    for path in mono_candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts
+                .font_data
+                .insert("ui_mono".to_owned(), Arc::new(FontData::from_owned(bytes)));
+            fonts
+                .families
+                .entry(FontFamily::Monospace)
+                .or_default()
+                .insert(0, "ui_mono".to_owned());
+            break;
+        }
+    }
+
+    ctx.set_fonts(fonts);
+}
+
+fn apply_obsidian_theme(ctx: &egui::Context) {
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = BG_OBSIDIAN;
+    v.window_fill = Color32::from_rgb(14, 13, 30);
+    v.extreme_bg_color = Color32::from_rgb(9, 8, 22);
+    v.faint_bg_color = Color32::from_rgb(16, 15, 34);
+    v.override_text_color = Some(TEXT_BRIGHT);
+    v.selection.bg_fill = Color32::from_rgba_unmultiplied(VIOLET.r(), VIOLET.g(), VIOLET.b(), 80);
+    v.widgets.inactive.bg_fill = Color32::from_rgb(20, 18, 40);
+    v.widgets.hovered.bg_fill = Color32::from_rgb(30, 26, 56);
+    v.widgets.active.bg_fill = Color32::from_rgb(42, 34, 76);
+    ctx.set_visuals(v);
+}
+
+pub fn run_gui(
+    event_rx: broadcast::Receiver<AppEvent>,
+    shared: Arc<Mutex<SharedState>>,
+    confirm_tx: mpsc::Sender<ConfirmResponse>,
+    interrupt_tx: mpsc::Sender<()>,
+) -> Result<(), eframe::Error> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([520.0_f32, 740.0_f32])
+            .with_min_inner_size([380.0_f32, 520.0_f32])
+            .with_decorations(false)
+            .with_title("Boogie"),
+        multisampling: 4,
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Boogie",
+        options,
+        Box::new(move |cc| {
+            Ok(Box::new(BoogieGui::new(
+                cc,
+                event_rx,
+                shared,
+                confirm_tx,
+                interrupt_tx,
+            )))
+        }),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merges_streaming_transcript_chunks_cleanly() {
+        let mut s = String::new();
+        append_transcript_chunk(&mut s, "I've lowered");
+        append_transcript_chunk(&mut s, "the brightness");
+        append_transcript_chunk(&mut s, "for");
+        append_transcript_chunk(&mut s, "you.");
+        append_transcript_chunk(&mut s, "Anything else?");
+        assert_eq!(s, "I've lowered the brightness for you. Anything else?");
+    }
+
+    #[test]
+    fn formats_tool_debug_into_clean_chip() {
+        let (title, detail) =
+            format_tool_log(r#"computer_settings Object {"action": String("brightness_down")}"#);
+        assert_eq!(title, "Computer Settings");
+        assert_eq!(detail, "brightness down");
+    }
+}

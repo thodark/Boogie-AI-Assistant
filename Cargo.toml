@@ -1,0 +1,106 @@
+[package]
+name = "boogie"
+version = "0.1.0"
+edition = "2024"
+description = "Boogie — real-time voice AI assistant"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# GUI
+eframe = "0.31"
+egui = "0.31"
+
+# Audio I/O
+cpal = "0.15"
+
+# WebSocket (Gemini Live API)
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+native-tls = "0.2"
+futures-util = "0.3"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "native-tls"] }
+
+# Web framework (dashboard)
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Crypto (dashboard auth)
+ring = "0.17"
+
+# Browser automation
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+
+# Windows APIs
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_System_SystemInformation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_System_Registry",
+] }
+
+# Screen capture
+screenshots = "0.8"
+
+# System info
+sysinfo = "0.33"
+
+# Image processing
+image = "0.25"
+
+# Numeric / DSP
+ndarray = "0.16"
+rustfft = "6"
+
+# Misc
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+rand = "0.8"
+regex = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+open = "5"
+urlencoding = "2"
+
+# File processing
+pdf-extract = "0.7"
+calamine = "0.38"
+
+# Web scraping
+scraper = "0.22"
+
+# QR code
+qrcode = "0.14"
+
+# Clipboard
+arboard = "3"
+
+# Send to trash
+trash = "5"
+
+[[bin]]
+name = "boogie"
+path = "src/main.rs"

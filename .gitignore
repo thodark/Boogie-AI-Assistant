@@ -1,0 +1,20 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+*.log
+
+# Local secrets, API keys & personal memory (never commit!)
+config/api_keys.json
+config/memory.json
+config/long_term.json
+**/config/api_keys.json
+**/config/memory.json
+**/config/long_term.json
+!config/api_keys.example.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
