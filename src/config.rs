@@ -2,26 +2,69 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-fn app_dir() -> PathBuf {
+use crate::util::truncate_chars;
+
+const EMBEDDED_PROMPT: &str = include_str!("../core/prompt.txt");
+const MAX_STORED_SESSIONS: usize = 10;
+const MAX_SESSION_SUMMARY_BYTES: usize = 1200;
+
+pub const DEFAULT_LIVE_MODEL: &str = "models/gemini-3.1-flash-live-preview";
+pub const DEFAULT_API_VERSION: &str = "v1alpha";
+
+fn exe_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
     exe.parent().unwrap_or(Path::new(".")).to_path_buf()
 }
 
-fn config_path() -> PathBuf {
-    app_dir().join("config").join("api_keys.json")
+fn appdata_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("Boogie"))
+}
+
+/// Candidate locations for `api_keys.json` in priority order:
+/// 1. `<exe_dir>/config/api_keys.json`
+/// 2. `<cwd>/config/api_keys.json`
+/// 3. `%APPDATA%/Boogie/api_keys.json`
+fn config_candidates() -> Vec<PathBuf> {
+    let mut paths = vec![exe_dir().join("config").join("api_keys.json")];
+    if let Ok(cwd) = std::env::current_dir() {
+        let p = cwd.join("config").join("api_keys.json");
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
+    if let Some(ad) = appdata_dir() {
+        paths.push(ad.join("api_keys.json"));
+    }
+    paths
+}
+
+/// Resolves the active config directory (where `api_keys.json` was found, or the default writable path).
+pub fn active_config_dir() -> PathBuf {
+    for p in config_candidates() {
+        if p.exists()
+            && let Some(parent) = p.parent()
+        {
+            return parent.to_path_buf();
+        }
+    }
+    exe_dir().join("config")
 }
 
 fn memory_path() -> PathBuf {
-    app_dir().join("config").join("memory.json")
+    active_config_dir().join("memory.json")
 }
 
 fn long_term_path() -> PathBuf {
-    app_dir().join("config").join("long_term.json")
+    active_config_dir().join("long_term.json")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ApiConfig {
     pub gemini_api_key: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub api_version: Option<String>,
     #[serde(default)]
     pub assistant_name: Option<String>,
     #[serde(default)]
@@ -29,41 +72,88 @@ pub struct ApiConfig {
     #[serde(default, alias = "voice_name")]
     pub voice: Option<String>,
     #[serde(default)]
+    pub input_device: Option<String>,
+    #[serde(default)]
+    pub output_device: Option<String>,
+    #[serde(default)]
     pub push_to_talk: Option<bool>,
     #[serde(default)]
     pub brief_enabled: Option<bool>,
     #[serde(default)]
     pub proactive_audio: Option<bool>,
     #[serde(default)]
-    pub media_resolution: Option<String>,
-    #[serde(default)]
-    pub thinking_enabled: Option<bool>,
+    pub dashboard_enabled: Option<bool>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
 
 impl ApiConfig {
     pub fn load() -> Result<Self, String> {
-        let path = config_path();
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        serde_json::from_str(&text).map_err(|e| format!("config parse error: {e}"))
+        let candidates = config_candidates();
+        for path in &candidates {
+            if path.exists() {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                let cfg: Self = serde_json::from_str(&text)
+                    .map_err(|e| format!("config parse error ({}): {e}", path.display()))?;
+                if cfg.gemini_api_key.trim().is_empty()
+                    || cfg.gemini_api_key.contains("YOUR_GEMINI_API_KEY")
+                {
+                    return Err(format!(
+                        "gemini_api_key is empty or placeholder in {}",
+                        path.display()
+                    ));
+                }
+                tracing::info!("loaded config from {}", path.display());
+                return Ok(cfg);
+            }
+        }
+        let searched: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+        Err(format!(
+            "api_keys.json not found (searched: {})",
+            searched.join(", ")
+        ))
+    }
+
+    pub fn save(&self) -> Result<PathBuf, String> {
+        let dir = active_config_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
+        let path = dir.join("api_keys.json");
+        let text = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
+        std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+        Ok(path)
     }
 
     pub fn api_key(&self) -> &str {
-        &self.gemini_api_key
+        self.gemini_api_key.trim()
+    }
+
+    pub fn model(&self) -> &str {
+        self.model
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(DEFAULT_LIVE_MODEL)
+    }
+
+    pub fn api_version(&self) -> &str {
+        self.api_version
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(DEFAULT_API_VERSION)
     }
 
     pub fn assistant_name(&self) -> &str {
-        self.assistant_name.as_deref().unwrap_or("Boogie")
+        self.assistant_name
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("Boogie")
     }
 
     pub fn voice(&self) -> &str {
-        self.voice.as_deref().unwrap_or("Aoede")
-    }
-
-    pub fn brief_enabled(&self) -> bool {
-        self.brief_enabled.unwrap_or(true)
+        self.voice
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("Aoede")
     }
 
     pub fn push_to_talk(&self) -> bool {
@@ -72,6 +162,10 @@ impl ApiConfig {
 
     pub fn proactive_audio(&self) -> bool {
         self.proactive_audio.unwrap_or(true)
+    }
+
+    pub fn dashboard_enabled(&self) -> bool {
+        self.dashboard_enabled.unwrap_or(false)
     }
 }
 
@@ -138,6 +232,8 @@ pub fn search_memory(query: &str, limit: usize) -> String {
                 lines.push(format!("- {cat}/{key}: {}", entry.value));
             }
         }
+        lines.sort();
+        lines.truncate(limit);
         return lines.join("\n");
     }
     let q = query.to_lowercase();
@@ -167,16 +263,24 @@ pub struct SessionSummary {
 }
 
 pub fn save_session_summary(summary: &str, language: &str) {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return;
+    }
     let path = long_term_path();
     let mut entries: Vec<SessionSummary> = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
         Err(_) => Vec::new(),
     };
     entries.push(SessionSummary {
-        date: chrono::Local::now().format("%Y-%m-%d").to_string(),
-        summary: summary.to_string(),
+        date: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+        summary: truncate_chars(trimmed, MAX_SESSION_SUMMARY_BYTES).to_string(),
         language: language.to_string(),
     });
+    if entries.len() > MAX_STORED_SESSIONS {
+        let drop_n = entries.len() - MAX_STORED_SESSIONS;
+        entries.drain(..drop_n);
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -185,28 +289,35 @@ pub fn save_session_summary(summary: &str, language: &str) {
     }
 }
 
-pub fn pop_last_session() -> Option<SessionSummary> {
+pub fn load_recent_sessions(limit: usize) -> Vec<SessionSummary> {
     let path = long_term_path();
-    let text = std::fs::read_to_string(&path).ok()?;
-    let mut entries: Vec<SessionSummary> = serde_json::from_str(&text).ok()?;
-    let last = entries.pop()?;
-    if let Ok(text) = serde_json::to_string_pretty(&entries) {
-        let _ = std::fs::write(&path, text);
-    }
-    Some(last)
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let entries: Vec<SessionSummary> = serde_json::from_str(&text).unwrap_or_default();
+    entries
+        .into_iter()
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
 }
 
 pub fn load_system_prompt() -> String {
-    let path = app_dir().join("core").join("prompt.txt");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(_) => {
-            "You are Boogie, a personal AI assistant. \
-             Be concise, direct, and always use the provided tools to complete tasks. \
-             Never simulate or guess results — always call the appropriate tool."
-                .to_string()
+    let override_candidates = [
+        exe_dir().join("core").join("prompt.txt"),
+        active_config_dir().join("prompt.txt"),
+    ];
+    for path in override_candidates {
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && !text.trim().is_empty()
+        {
+            return text;
         }
     }
+    EMBEDDED_PROMPT.to_string()
 }
 
 pub fn render_prompt(template: &str, values: &[(&str, &str)]) -> String {
@@ -221,7 +332,11 @@ pub fn describe_tools(declarations: &[crate::tools::ToolDeclaration]) -> String 
     declarations
         .iter()
         .map(|d| {
-            let desc = d.description.split_whitespace().collect::<Vec<_>>().join(" ");
+            let desc = d
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             if desc.is_empty() {
                 format!("- {}", d.name)
             } else {
@@ -249,8 +364,8 @@ pub fn describe_limits(has_vision: bool, has_mic: bool) -> String {
     if has_vision {
         out.push(
             "- Your sight is not continuous. You see nothing until you call a \
-             vision tool, and then only that single frame at that moment — you \
-             cannot watch, monitor or notice something changing on screen."
+             vision tool (take_screenshot / screen_process), and then only that \
+             single frame at that moment — you cannot continuously watch the screen."
                 .to_string(),
         );
     } else {
@@ -266,12 +381,12 @@ pub fn describe_limits(has_vision: bool, has_mic: bool) -> String {
     out.join("\n")
 }
 
-fn detect_language(memory: &Memory) -> String {
+pub fn detect_language(memory: &Memory) -> String {
     for key in ["identity", "preferences", "user"] {
-        if let Some(cat) = memory.get(key) {
-            if let Some(entry) = cat.get("language") {
-                return entry.value.clone();
-            }
+        if let Some(cat) = memory.get(key)
+            && let Some(entry) = cat.get("language")
+        {
+            return entry.value.clone();
         }
     }
     "Vietnamese".to_string()
@@ -287,7 +402,8 @@ pub fn build_full_prompt(
 
     let tool_names: std::collections::HashSet<&str> =
         tool_declarations.iter().map(|d| d.name.as_str()).collect();
-    let has_vision = tool_names.contains("screen_process");
+    let has_vision =
+        tool_names.contains("screen_process") || tool_names.contains("take_screenshot");
     let has_mic = true;
 
     let asst_name = cfg.assistant_name();
@@ -295,12 +411,15 @@ pub fn build_full_prompt(
     let capabilities = describe_tools(tool_declarations);
     let limits = describe_limits(has_vision, has_mic);
 
-    let rendered = render_prompt(&raw_template, &[
-        ("assistant_name", asst_name),
-        ("platform", &platform),
-        ("capabilities", &capabilities),
-        ("limits", &limits),
-    ]);
+    let rendered = render_prompt(
+        &raw_template,
+        &[
+            ("assistant_name", asst_name),
+            ("platform", &platform),
+            ("capabilities", &capabilities),
+            ("limits", &limits),
+        ],
+    );
 
     let now = chrono::Local::now();
     let time_str = now.format("%A, %B %d, %Y — %I:%M %p").to_string();
@@ -309,7 +428,8 @@ pub fn build_full_prompt(
          Use this to calculate exact times for reminders.\n"
     );
 
-    let addr = match user_name {
+    let clean_user = user_name.map(str::trim).filter(|s| !s.is_empty());
+    let addr = match clean_user {
         Some(name) => format!("ADDRESS: Always call the user '{name}'."),
         None => "ADDRESS: Address the user with the ordinary respectful form \
                  for a superior in the language you are currently speaking — \
@@ -342,9 +462,27 @@ pub fn build_full_prompt(
 
     let mem_text = format_memory_for_prompt(memory);
 
+    let recent_sessions = load_recent_sessions(2);
+    let sessions_ctx = if recent_sessions.is_empty() {
+        String::new()
+    } else {
+        let mut block = String::from("[PREVIOUS SESSIONS SUMMARY]\n");
+        for s in recent_sessions {
+            block.push_str(&format!(
+                "- ({}): {}\n",
+                s.date,
+                truncate_chars(&s.summary, 450)
+            ));
+        }
+        block
+    };
+
     let mut parts = vec![time_ctx, identity_ctx, lang_ctx];
     if !mem_text.is_empty() {
         parts.push(mem_text);
+    }
+    if !sessions_ctx.is_empty() {
+        parts.push(sessions_ctx);
     }
     parts.push(rendered);
     parts.join("\n")

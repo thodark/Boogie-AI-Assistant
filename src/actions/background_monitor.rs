@@ -1,4 +1,5 @@
 use crate::tools::{ToolRegistry, ToolResult};
+use crate::util::{http_client, truncate_chars};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,8 +14,18 @@ pub fn register(registry: &mut ToolRegistry) {
              remove (stop monitoring), list (show all monitored topics), \
              check (run all pending checks now — normally runs automatically).",
             vec![
-                ("action", param("action", "string", "add | remove | list | check (default: add)")),
-                ("topic", param("topic", "string", "Topic to monitor (for add/remove)")),
+                (
+                    "action",
+                    param(
+                        "action",
+                        "string",
+                        "add | remove | list | check (default: add)",
+                    ),
+                ),
+                (
+                    "topic",
+                    param("topic", "string", "Topic to monitor (for add/remove)"),
+                ),
             ],
             vec![],
         ),
@@ -23,9 +34,23 @@ pub fn register(registry: &mut ToolRegistry) {
 }
 
 const BLOCKED: &[&str] = &[
-    "bitcoin", "ethereum", "dogecoin", "solana", "binance",
-    "nft", "blockchain", "defi", "altcoin", "memecoin", "coin", "token",
-    "crypto", "kripto", "cripto", "krypto", "cryptocurrency",
+    "bitcoin",
+    "ethereum",
+    "dogecoin",
+    "solana",
+    "binance",
+    "nft",
+    "blockchain",
+    "defi",
+    "altcoin",
+    "memecoin",
+    "coin",
+    "token",
+    "crypto",
+    "kripto",
+    "cripto",
+    "krypto",
+    "cryptocurrency",
 ];
 
 fn is_blocked(topic: &str) -> bool {
@@ -35,9 +60,14 @@ fn is_blocked(topic: &str) -> bool {
 
 fn slug(topic: &str) -> String {
     let lower = topic.to_lowercase();
-    let s: String = lower.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+    let s: String = lower
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
     let trimmed = s.trim_matches('_');
-    if trimmed.len() > 40 { trimmed[..40].trim_end_matches('_').to_string() } else { trimmed.to_string() }
+    truncate_chars(trimmed, 40)
+        .trim_end_matches('_')
+        .to_string()
 }
 
 fn title_hash(title: &str) -> String {
@@ -45,7 +75,7 @@ fn title_hash(title: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     title.hash(&mut h);
-    format!("{:012x}", h.finish())[..12].to_string()
+    format!("{:016x}", h.finish())[..12].to_string()
 }
 
 fn monitors_path() -> PathBuf {
@@ -89,12 +119,7 @@ async fn ddg_news_search(topic: &str, max: usize) -> Vec<(String, String)> {
     let encoded = urlencoding::encode(&query);
     let url = format!("https://html.duckduckgo.com/html/?q={encoded}");
 
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0")
-        .build()
-        .unwrap_or_default();
-
-    let html = match client.get(&url).send().await {
+    let html = match http_client().get(&url).send().await {
         Ok(resp) => resp.text().await.unwrap_or_default(),
         Err(_) => return Vec::new(),
     };
@@ -103,15 +128,34 @@ async fn ddg_news_search(topic: &str, max: usize) -> Vec<(String, String)> {
     let title_sel = scraper::Selector::parse(".result__a").unwrap();
     let snippet_sel = scraper::Selector::parse(".result__snippet").unwrap();
 
-    let titles: Vec<String> = doc.select(&title_sel).map(|el| el.text().collect::<String>().trim().to_string()).collect();
-    let snippets: Vec<String> = doc.select(&snippet_sel).map(|el| el.text().collect::<String>().trim().to_string()).collect();
+    let titles: Vec<String> = doc
+        .select(&title_sel)
+        .map(|el| el.text().collect::<String>().trim().to_string())
+        .collect();
+    let snippets: Vec<String> = doc
+        .select(&snippet_sel)
+        .map(|el| el.text().collect::<String>().trim().to_string())
+        .collect();
 
-    titles.into_iter().zip(snippets.into_iter().chain(std::iter::repeat(String::new()))).take(max).collect()
+    titles
+        .into_iter()
+        .zip(snippets.into_iter().chain(std::iter::repeat(String::new())))
+        .take(max)
+        .collect()
 }
 
 async fn background_monitor(args: Value) -> ToolResult {
-    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("add").to_lowercase();
-    let topic = args.get("topic").and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("add")
+        .to_lowercase();
+    let topic = args
+        .get("topic")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
 
     match action.as_str() {
         "add" => {
@@ -126,12 +170,15 @@ async fn background_monitor(args: Value) -> ToolResult {
             if monitors.contains_key(&s) {
                 return ToolResult::ok(format!("Already monitoring: {}", monitors[&s].topic));
             }
-            monitors.insert(s, MonitorEntry {
-                topic: topic.clone(),
-                added: chrono::Local::now().format("%Y-%m-%d").to_string(),
-                last_check: String::new(),
-                last_hash: String::new(),
-            });
+            monitors.insert(
+                s,
+                MonitorEntry {
+                    topic: topic.clone(),
+                    added: chrono::Local::now().format("%Y-%m-%d").to_string(),
+                    last_check: String::new(),
+                    last_hash: String::new(),
+                },
+            );
             save_monitors(&monitors);
             ToolResult::ok(format!("Now monitoring: {topic}"))
         }
@@ -147,7 +194,10 @@ async fn background_monitor(args: Value) -> ToolResult {
                 return ToolResult::ok(format!("Stopped monitoring: {}", entry.topic));
             }
             let lower = topic.to_lowercase();
-            let key = monitors.iter().find(|(_, v)| v.topic.to_lowercase().contains(&lower)).map(|(k, _)| k.clone());
+            let key = monitors
+                .iter()
+                .find(|(_, v)| v.topic.to_lowercase().contains(&lower))
+                .map(|(k, _)| k.clone());
             if let Some(k) = key {
                 let entry = monitors.remove(&k).unwrap();
                 save_monitors(&monitors);
@@ -166,55 +216,17 @@ async fn background_monitor(args: Value) -> ToolResult {
         }
 
         "check" => {
-            let mut monitors = load_monitors();
-            if monitors.is_empty() {
-                return ToolResult::ok("No topics to check.");
-            }
-
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let mut alerts = Vec::new();
-            let mut changed = false;
-
-            for (_slug, data) in monitors.iter_mut() {
-                if data.last_check == today {
-                    continue;
-                }
-
-                let results = ddg_news_search(&data.topic, 5).await;
-                data.last_check = today.clone();
-                changed = true;
-
-                if results.is_empty() {
-                    continue;
-                }
-
-                let (title, snippet) = &results[0];
-                if title.is_empty() {
-                    continue;
-                }
-
-                let h = title_hash(title);
-                if h == data.last_hash {
-                    continue;
-                }
-                data.last_hash = h;
-
-                let truncated = if snippet.len() > 150 { &snippet[..150] } else { snippet.as_str() };
-                alerts.push(format!("[MONITOR_ALERT] {}\nHeadline: {}\n{}", data.topic, title, truncated));
-            }
-
-            if changed {
-                save_monitors(&monitors);
-            }
-
+            let alerts = check_all_monitors().await;
             if alerts.is_empty() {
                 ToolResult::ok("All topics checked — no new headlines.")
             } else {
-                ToolResult::ok(alerts.join("\n\n"))
+                ToolResult::ok_untrusted("web", alerts.join("\n\n"))
             }
         }
 
-        _ => ToolResult::err(format!("Unknown action: {action}. Use add, remove, list, or check.")),
+        _ => ToolResult::err(format!(
+            "Unknown action: {action}. Use add, remove, list, or check."
+        )),
     }
 }
 
@@ -228,7 +240,7 @@ pub async fn check_all_monitors() -> Vec<String> {
     let mut alerts = Vec::new();
     let mut changed = false;
 
-    for (_slug, data) in monitors.iter_mut() {
+    for data in monitors.values_mut() {
         if data.last_check == today {
             continue;
         }
@@ -252,8 +264,11 @@ pub async fn check_all_monitors() -> Vec<String> {
         }
         data.last_hash = h;
 
-        let truncated = if snippet.len() > 150 { &snippet[..150] } else { snippet.as_str() };
-        alerts.push(format!("[MONITOR_ALERT] {}\nHeadline: {}\n{}", data.topic, title, truncated));
+        let truncated = truncate_chars(snippet, 150);
+        alerts.push(format!(
+            "[MONITOR_ALERT] {}\nHeadline: {}\n{}",
+            data.topic, title, truncated
+        ));
     }
 
     if changed {

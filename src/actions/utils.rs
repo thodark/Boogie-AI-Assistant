@@ -1,26 +1,33 @@
+use crate::AppEvent;
 use crate::tools::{ToolRegistry, ToolResult};
+use crate::util::truncate_chars;
 use serde_json::Value;
+use tokio::sync::broadcast;
 
 use super::{param, tool};
 
-pub fn register(registry: &mut ToolRegistry) {
+pub fn register(registry: &mut ToolRegistry, event_tx: broadcast::Sender<AppEvent>) {
+    let tx_timer = event_tx;
     registry.register(
         tool(
             "set_timer",
-            "Set a timer or reminder",
+            "Set a short in-app countdown timer (seconds). When it finishes, Boogie announces it aloud and shows a notification.",
             vec![
                 ("seconds", param("seconds", "integer", "Seconds from now")),
-                ("message", param("message", "string", "Reminder message")),
+                ("message", param("message", "string", "Timer message")),
             ],
             vec!["seconds"],
         ),
-        Box::new(|args| Box::pin(set_timer(args))),
+        Box::new(move |args| {
+            let tx = tx_timer.clone();
+            Box::pin(set_timer(args, tx))
+        }),
     );
 
     registry.register(
         tool(
             "get_datetime",
-            "Get the current date and time",
+            "Get the current local date and time.",
             vec![],
             vec![],
         ),
@@ -30,10 +37,10 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         tool(
             "generate_qrcode",
-            "Generate a QR code from text",
+            "Generate a QR code PNG image from text.",
             vec![
                 ("data", param("data", "string", "Data to encode")),
-                ("path", param("path", "string", "Output file path")),
+                ("path", param("path", "string", "Output PNG file path")),
             ],
             vec!["data"],
         ),
@@ -43,7 +50,7 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         tool(
             "read_pdf",
-            "Extract text from a PDF file",
+            "Extract text from a PDF file.",
             vec![("path", param("path", "string", "PDF file path"))],
             vec!["path"],
         ),
@@ -53,55 +60,42 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         tool(
             "read_excel",
-            "Read data from an Excel file",
+            "Read rows from an Excel spreadsheet.",
             vec![
                 ("path", param("path", "string", "Excel file path")),
-                ("sheet", param("sheet", "string", "Sheet name (default: first)")),
+                (
+                    "sheet",
+                    param("sheet", "string", "Sheet name (default: first)"),
+                ),
             ],
             vec!["path"],
         ),
         Box::new(|args| Box::pin(read_excel(args))),
     );
-
-    registry.register(
-        tool(
-            "update_memory",
-            "Store information in long-term memory",
-            vec![
-                ("category", param("category", "string", "Memory category")),
-                ("key", param("key", "string", "Memory key")),
-                ("value", param("value", "string", "Value to remember")),
-            ],
-            vec!["category", "key", "value"],
-        ),
-        Box::new(|args| Box::pin(update_memory_action(args))),
-    );
-
-    registry.register(
-        tool(
-            "search_memory",
-            "Search stored memories",
-            vec![("query", param("query", "string", "Search query"))],
-            vec![],
-        ),
-        Box::new(|args| Box::pin(search_memory_action(args))),
-    );
 }
 
-async fn set_timer(args: Value) -> ToolResult {
-    let seconds = args.get("seconds").and_then(|v| v.as_u64()).unwrap_or(60);
+async fn set_timer(args: Value, event_tx: broadcast::Sender<AppEvent>) -> ToolResult {
+    let seconds = args
+        .get("seconds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60)
+        .clamp(1, 86_400);
     let message = args
         .get("message")
         .and_then(|v| v.as_str())
         .unwrap_or("Timer done!")
+        .trim()
         .to_string();
 
+    let msg_clone = message.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
-        tracing::info!("TIMER: {message}");
+        tracing::info!("Timer finished: {msg_clone}");
+        let _ = event_tx.send(AppEvent::Log(format!("Timer finished: {msg_clone}")));
+        let _ = event_tx.send(AppEvent::TimerAlert(msg_clone));
     });
 
-    ToolResult::ok(format!("timer set for {seconds} seconds"))
+    ToolResult::ok(format!("Timer set for {seconds} seconds ({message})."))
 }
 
 async fn get_datetime(_args: Value) -> ToolResult {
@@ -110,94 +104,92 @@ async fn get_datetime(_args: Value) -> ToolResult {
 }
 
 async fn generate_qrcode(args: Value) -> ToolResult {
-    let data = args.get("data").and_then(|v| v.as_str()).unwrap_or_default();
+    let data = args
+        .get("data")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let path = args
         .get("path")
         .and_then(|v| v.as_str())
-        .unwrap_or("qrcode.png");
+        .unwrap_or("qrcode.png")
+        .to_string();
 
-    match qrcode::QrCode::new(data.as_bytes()) {
+    tokio::task::spawn_blocking(move || match qrcode::QrCode::new(data.as_bytes()) {
         Ok(code) => {
             let img = code.render::<image::Luma<u8>>().build();
-            match img.save(path) {
+            match img.save(&path) {
                 Ok(_) => ToolResult::ok(format!("QR code saved to {path}")),
                 Err(e) => ToolResult::err(format!("save QR: {e}")),
             }
         }
         Err(e) => ToolResult::err(format!("generate QR: {e}")),
-    }
+    })
+    .await
+    .unwrap_or_else(|e| ToolResult::err(format!("generate_qrcode task failed: {e}")))
 }
 
 async fn read_pdf(args: Value) -> ToolResult {
-    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or_default();
-    match pdf_extract::extract_text(path) {
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    tokio::task::spawn_blocking(move || match pdf_extract::extract_text(&path) {
         Ok(text) => {
-            if text.len() > 50_000 {
-                ToolResult::ok(format!("{}...(truncated)", &text[..50_000]))
+            let body = if text.len() > 50_000 {
+                format!("{}...(truncated)", truncate_chars(&text, 50_000))
             } else {
-                ToolResult::ok(text)
-            }
+                text
+            };
+            ToolResult::ok_untrusted("document", body)
         }
         Err(e) => ToolResult::err(format!("pdf extract: {e}")),
-    }
+    })
+    .await
+    .unwrap_or_else(|e| ToolResult::err(format!("read_pdf task failed: {e}")))
 }
 
 async fn read_excel(args: Value) -> ToolResult {
-    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or_default();
-    let sheet = args.get("sheet").and_then(|v| v.as_str());
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let sheet = args
+        .get("sheet")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
-    use calamine::Reader;
-    match calamine::open_workbook_auto(path) {
-        Ok(mut wb) => {
-            let names: Vec<String> = wb.sheet_names().to_vec();
-            let sheet_name = if let Some(s) = sheet {
-                s.to_string()
-            } else {
-                match names.first() {
-                    Some(name) => name.clone(),
-                    None => return ToolResult::err("no sheets found"),
-                }
-            };
-
-            match wb.worksheet_range(&sheet_name) {
-                Ok(range) => {
-                    let mut lines = Vec::new();
-                    for row in range.rows().take(100) {
-                        let cells: Vec<String> = row
-                            .iter()
-                            .map(|c| format!("{c}"))
-                            .collect();
-                        lines.push(cells.join("\t"));
+    tokio::task::spawn_blocking(move || {
+        use calamine::Reader;
+        match calamine::open_workbook_auto(&path) {
+            Ok(mut wb) => {
+                let names: Vec<String> = wb.sheet_names().to_vec();
+                let sheet_name = if let Some(s) = sheet {
+                    s
+                } else {
+                    match names.first() {
+                        Some(name) => name.clone(),
+                        None => return ToolResult::err("no sheets found"),
                     }
-                    ToolResult::ok(lines.join("\n"))
+                };
+
+                match wb.worksheet_range(&sheet_name) {
+                    Ok(range) => {
+                        let mut lines = Vec::new();
+                        for row in range.rows().take(100) {
+                            let cells: Vec<String> = row.iter().map(|c| format!("{c}")).collect();
+                            lines.push(cells.join("\t"));
+                        }
+                        ToolResult::ok_untrusted("document", lines.join("\n"))
+                    }
+                    Err(e) => ToolResult::err(format!("read sheet: {e}")),
                 }
-                Err(e) => ToolResult::err(format!("read sheet: {e}")),
             }
+            Err(e) => ToolResult::err(format!("open workbook: {e}")),
         }
-        Err(e) => ToolResult::err(format!("open workbook: {e}")),
-    }
-}
-
-async fn update_memory_action(args: Value) -> ToolResult {
-    let cat = args.get("category").and_then(|v| v.as_str()).unwrap_or("general");
-    let key = args.get("key").and_then(|v| v.as_str()).unwrap_or_default();
-    let value = args.get("value").and_then(|v| v.as_str()).unwrap_or_default();
-
-    let mut updates = crate::config::Memory::new();
-    let mut cat_map = crate::config::MemoryCategory::new();
-    cat_map.insert(
-        key.to_string(),
-        crate::config::MemoryEntry {
-            value: value.to_string(),
-        },
-    );
-    updates.insert(cat.to_string(), cat_map);
-    crate::config::update_memory(&updates);
-
-    ToolResult::ok(format!("remembered {cat}/{key}"))
-}
-
-async fn search_memory_action(args: Value) -> ToolResult {
-    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or_default();
-    ToolResult::ok(crate::config::search_memory(query, 20))
+    })
+    .await
+    .unwrap_or_else(|e| ToolResult::err(format!("read_excel task failed: {e}")))
 }

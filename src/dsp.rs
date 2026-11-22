@@ -1,4 +1,4 @@
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{FftPlanner, num_complex::Complex};
 
 const LEVEL_FLOOR: f32 = 60.0;
 const LEVEL_FULL: f32 = 2600.0;
@@ -28,9 +28,7 @@ pub fn pcm_visemes(samples: &[i16], sr: u32) -> Vec<(f32, f32, f32)> {
     let fft = planner.plan_fft_forward(VIS_WIN);
 
     let hanning: Vec<f32> = (0..VIS_WIN)
-        .map(|i| {
-            0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (VIS_WIN - 1) as f32).cos())
-        })
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (VIS_WIN - 1) as f32).cos()))
         .collect();
 
     let freq_bin = |f: f32| -> usize { (f * VIS_WIN as f32 / sr_f).round() as usize };
@@ -96,11 +94,7 @@ pub fn pcm_visemes(samples: &[i16], sr: u32) -> Vec<(f32, f32, f32)> {
         let h = h_val / (f1l + f1h + f2b + f2f + h_val + 1e-6);
         openness *= 1.0 - 0.65 * (h * 2.5).min(1.0);
 
-        out.push((
-            level,
-            openness.clamp(0.0, 1.0),
-            width.clamp(-1.0, 1.0),
-        ));
+        out.push((level, openness.clamp(0.0, 1.0), width.clamp(-1.0, 1.0)));
 
         start += VIS_HOP;
     }

@@ -1,4 +1,5 @@
 use crate::tools::{ToolRegistry, ToolResult};
+use crate::util::truncate_chars;
 use serde_json::Value;
 use std::sync::Mutex;
 
@@ -14,12 +15,10 @@ static UNDO_STACK: Mutex<Vec<UndoAction>> = Mutex::new(Vec::new());
 pub fn pop_undo() -> Option<String> {
     let action = UNDO_STACK.lock().ok()?.pop()?;
     match action {
-        UndoAction::Volume(prev) => {
-            match set_volume_com(prev) {
-                Ok(()) => Some(format!("Volume restored to {}%", (prev * 100.0) as u32)),
-                Err(e) => Some(format!("Failed to restore volume: {e}")),
-            }
-        }
+        UndoAction::Volume(prev) => match set_volume_com(prev) {
+            Ok(()) => Some(format!("Volume restored to {}%", (prev * 100.0) as u32)),
+            Err(e) => Some(format!("Failed to restore volume: {e}")),
+        },
         UndoAction::DarkMode => {
             let r = dark_mode_toggle();
             Some(r.output)
@@ -29,21 +28,26 @@ pub fn pop_undo() -> Option<String> {
 
 #[cfg(windows)]
 fn get_volume_com() -> Option<f32> {
-    use windows::Win32::Media::Audio::*;
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+    use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
         let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
-        let volume: IAudioEndpointVolume = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok()?;
+        let volume: IAudioEndpointVolume = device
+            .Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+            .ok()?;
         volume.GetMasterVolumeLevelScalar().ok()
     }
 }
 
 #[cfg(not(windows))]
-fn get_volume_com() -> Option<f32> { None }
+fn get_volume_com() -> Option<f32> {
+    None
+}
 
 fn push_undo(action: UndoAction) {
     if let Ok(mut stack) = UNDO_STACK.lock() {
@@ -60,7 +64,7 @@ pub fn register(registry: &mut ToolRegistry) {
             "computer_settings",
             "Controls the computer: volume, brightness, window management, keyboard shortcuts, \
              typing text on screen, dark mode, screenshots, lock screen, tab management, zoom, scrolling. \
-             restart, shutdown and toggle_wifi require user confirmation. \
+             restart, shutdown, lock_screen, sleep_display and toggle_wifi require user confirmation. \
              Pick the exact action name from: \
              volume_up | volume_down | volume_set | mute | \
              brightness_up | brightness_down | sleep_display | \
@@ -76,8 +80,18 @@ pub fn register(registry: &mut ToolRegistry) {
              file_explorer | open_run | dark_mode | toggle_wifi | \
              restart | shutdown",
             vec![
-                ("action", param("action", "string", "The exact action name from the list above")),
-                ("value", param("value", "string", "Optional value: volume level 0-100, text to type, key name")),
+                (
+                    "action",
+                    param("action", "string", "The exact action name from the list above"),
+                ),
+                (
+                    "value",
+                    param(
+                        "value",
+                        "string",
+                        "Optional value: volume level 0-100, text to type, key name",
+                    ),
+                ),
             ],
             vec!["action"],
         ),
@@ -92,71 +106,200 @@ async fn computer_settings(args: Value) -> ToolResult {
         .unwrap_or_default()
         .trim()
         .to_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_");
+        .replace(['-', ' '], "_");
 
-    let value = args.get("value").and_then(|v| v.as_str()).unwrap_or_default();
+    let value = args
+        .get("value")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
 
     if action.is_empty() {
         return ToolResult::err("No action specified");
     }
 
-    match action.as_str() {
+    tokio::task::spawn_blocking(move || computer_settings_sync(&action, &value))
+        .await
+        .unwrap_or_else(|e| ToolResult::err(format!("computer_settings task failed: {e}")))
+}
+
+fn computer_settings_sync(action: &str, value: &str) -> ToolResult {
+    match action {
         "volume_up" => {
-            if let Some(v) = get_volume_com() { push_undo(UndoAction::Volume(v)); }
+            if let Some(v) = get_volume_com() {
+                push_undo(UndoAction::Volume(v));
+            }
             keys(&["volumeup"; 5]);
             ToolResult::ok("Volume increased")
         }
         "volume_down" => {
-            if let Some(v) = get_volume_com() { push_undo(UndoAction::Volume(v)); }
+            if let Some(v) = get_volume_com() {
+                push_undo(UndoAction::Volume(v));
+            }
             keys(&["volumedown"; 5]);
             ToolResult::ok("Volume decreased")
         }
-        "mute" | "unmute" | "toggle_mute" => { key("volumemute"); ToolResult::ok("Mute toggled") }
+        "mute" | "unmute" | "toggle_mute" => {
+            key("volumemute");
+            ToolResult::ok("Mute toggled")
+        }
         "volume_set" => {
-            if let Some(v) = get_volume_com() { push_undo(UndoAction::Volume(v)); }
+            if let Some(v) = get_volume_com() {
+                push_undo(UndoAction::Volume(v));
+            }
             volume_set(value)
         }
         "brightness_up" => brightness_change(10),
         "brightness_down" => brightness_change(-10),
         "sleep_display" | "screen_off" => sleep_display(),
-        "pause_video" | "play_pause" => { key("space"); ToolResult::ok("Play/pause toggled") }
-        "close_window" => { hotkey(&["ctrl", "w"]); ToolResult::ok("Window closed") }
-        "full_screen" | "fullscreen" => { key("f11"); ToolResult::ok("Fullscreen toggled") }
-        "minimize" => { hotkey(&["win", "down"]); ToolResult::ok("Window minimized") }
-        "maximize" => { hotkey(&["win", "up"]); ToolResult::ok("Window maximized") }
-        "snap_left" => { hotkey(&["win", "left"]); ToolResult::ok("Window snapped left") }
-        "snap_right" => { hotkey(&["win", "right"]); ToolResult::ok("Window snapped right") }
-        "switch_window" => { hotkey(&["alt", "tab"]); ToolResult::ok("Switched window") }
-        "show_desktop" => { hotkey(&["win", "d"]); ToolResult::ok("Desktop shown") }
-        "task_manager" => { hotkey(&["ctrl", "shift", "esc"]); ToolResult::ok("Task Manager opened") }
-        "focus_search" => { hotkey(&["ctrl", "l"]); ToolResult::ok("Search focused") }
-        "refresh_page" | "reload" => { key("f5"); ToolResult::ok("Page refreshed") }
-        "close_tab" => { hotkey(&["ctrl", "w"]); ToolResult::ok("Tab closed") }
-        "new_tab" => { hotkey(&["ctrl", "t"]); ToolResult::ok("New tab opened") }
-        "next_tab" => { hotkey(&["ctrl", "tab"]); ToolResult::ok("Next tab") }
-        "prev_tab" => { hotkey(&["ctrl", "shift", "tab"]); ToolResult::ok("Previous tab") }
-        "go_back" => { hotkey(&["alt", "left"]); ToolResult::ok("Navigated back") }
-        "go_forward" => { hotkey(&["alt", "right"]); ToolResult::ok("Navigated forward") }
-        "zoom_in" => { hotkey(&["ctrl", "="]); ToolResult::ok("Zoomed in") }
-        "zoom_out" => { hotkey(&["ctrl", "-"]); ToolResult::ok("Zoomed out") }
-        "zoom_reset" => { hotkey(&["ctrl", "0"]); ToolResult::ok("Zoom reset") }
-        "find_on_page" => { hotkey(&["ctrl", "f"]); ToolResult::ok("Find on page opened") }
-        "scroll_up" => { scroll(value.parse().unwrap_or(500)); ToolResult::ok("Scrolled up") }
-        "scroll_down" => { scroll(-(value.parse().unwrap_or(500i32))); ToolResult::ok("Scrolled down") }
-        "scroll_top" => { hotkey(&["ctrl", "home"]); ToolResult::ok("Scrolled to top") }
-        "scroll_bottom" => { hotkey(&["ctrl", "end"]); ToolResult::ok("Scrolled to bottom") }
-        "page_up" => { key("pageup"); ToolResult::ok("Page up") }
-        "page_down" => { key("pagedown"); ToolResult::ok("Page down") }
-        "copy" => { hotkey(&["ctrl", "c"]); ToolResult::ok("Copied") }
-        "paste" => { hotkey(&["ctrl", "v"]); ToolResult::ok("Pasted") }
-        "cut" => { hotkey(&["ctrl", "x"]); ToolResult::ok("Cut") }
-        "undo" => { hotkey(&["ctrl", "z"]); ToolResult::ok("Undone") }
-        "redo" => { hotkey(&["ctrl", "y"]); ToolResult::ok("Redone") }
-        "select_all" => { hotkey(&["ctrl", "a"]); ToolResult::ok("All selected") }
-        "save" => { hotkey(&["ctrl", "s"]); ToolResult::ok("Saved") }
-        "enter" => { key("enter"); ToolResult::ok("Enter pressed") }
-        "escape" => { key("escape"); ToolResult::ok("Escape pressed") }
+        "pause_video" | "play_pause" => {
+            key("mediaplaypause");
+            ToolResult::ok("Media play/pause toggled")
+        }
+        "close_window" => {
+            hotkey(&["ctrl", "w"]);
+            ToolResult::ok("Window closed")
+        }
+        "full_screen" | "fullscreen" => {
+            key("f11");
+            ToolResult::ok("Fullscreen toggled")
+        }
+        "minimize" => {
+            hotkey(&["win", "down"]);
+            ToolResult::ok("Window minimized")
+        }
+        "maximize" => {
+            hotkey(&["win", "up"]);
+            ToolResult::ok("Window maximized")
+        }
+        "snap_left" => {
+            hotkey(&["win", "left"]);
+            ToolResult::ok("Window snapped left")
+        }
+        "snap_right" => {
+            hotkey(&["win", "right"]);
+            ToolResult::ok("Window snapped right")
+        }
+        "switch_window" => {
+            hotkey(&["alt", "tab"]);
+            ToolResult::ok("Switched window")
+        }
+        "show_desktop" => {
+            hotkey(&["win", "d"]);
+            ToolResult::ok("Desktop shown")
+        }
+        "task_manager" => {
+            hotkey(&["ctrl", "shift", "esc"]);
+            ToolResult::ok("Task Manager opened")
+        }
+        "focus_search" => {
+            hotkey(&["ctrl", "l"]);
+            ToolResult::ok("Search focused")
+        }
+        "refresh_page" | "reload" => {
+            key("f5");
+            ToolResult::ok("Page refreshed")
+        }
+        "close_tab" => {
+            hotkey(&["ctrl", "w"]);
+            ToolResult::ok("Tab closed")
+        }
+        "new_tab" => {
+            hotkey(&["ctrl", "t"]);
+            ToolResult::ok("New tab opened")
+        }
+        "next_tab" => {
+            hotkey(&["ctrl", "tab"]);
+            ToolResult::ok("Next tab")
+        }
+        "prev_tab" => {
+            hotkey(&["ctrl", "shift", "tab"]);
+            ToolResult::ok("Previous tab")
+        }
+        "go_back" => {
+            hotkey(&["alt", "left"]);
+            ToolResult::ok("Navigated back")
+        }
+        "go_forward" => {
+            hotkey(&["alt", "right"]);
+            ToolResult::ok("Navigated forward")
+        }
+        "zoom_in" => {
+            hotkey(&["ctrl", "="]);
+            ToolResult::ok("Zoomed in")
+        }
+        "zoom_out" => {
+            hotkey(&["ctrl", "-"]);
+            ToolResult::ok("Zoomed out")
+        }
+        "zoom_reset" => {
+            hotkey(&["ctrl", "0"]);
+            ToolResult::ok("Zoom reset")
+        }
+        "find_on_page" => {
+            hotkey(&["ctrl", "f"]);
+            ToolResult::ok("Find on page opened")
+        }
+        "scroll_up" => {
+            scroll(value.parse().unwrap_or(500));
+            ToolResult::ok("Scrolled up")
+        }
+        "scroll_down" => {
+            scroll(-(value.parse().unwrap_or(500i32)));
+            ToolResult::ok("Scrolled down")
+        }
+        "scroll_top" => {
+            hotkey(&["ctrl", "home"]);
+            ToolResult::ok("Scrolled to top")
+        }
+        "scroll_bottom" => {
+            hotkey(&["ctrl", "end"]);
+            ToolResult::ok("Scrolled to bottom")
+        }
+        "page_up" => {
+            key("pageup");
+            ToolResult::ok("Page up")
+        }
+        "page_down" => {
+            key("pagedown");
+            ToolResult::ok("Page down")
+        }
+        "copy" => {
+            hotkey(&["ctrl", "c"]);
+            ToolResult::ok("Copied")
+        }
+        "paste" => {
+            hotkey(&["ctrl", "v"]);
+            ToolResult::ok("Pasted")
+        }
+        "cut" => {
+            hotkey(&["ctrl", "x"]);
+            ToolResult::ok("Cut")
+        }
+        "undo" => {
+            hotkey(&["ctrl", "z"]);
+            ToolResult::ok("Undone")
+        }
+        "redo" => {
+            hotkey(&["ctrl", "y"]);
+            ToolResult::ok("Redone")
+        }
+        "select_all" => {
+            hotkey(&["ctrl", "a"]);
+            ToolResult::ok("All selected")
+        }
+        "save" => {
+            hotkey(&["ctrl", "s"]);
+            ToolResult::ok("Saved")
+        }
+        "enter" => {
+            key("enter");
+            ToolResult::ok("Enter pressed")
+        }
+        "escape" => {
+            key("escape");
+            ToolResult::ok("Escape pressed")
+        }
         "press_key" => {
             if value.is_empty() {
                 ToolResult::err("No key specified")
@@ -170,14 +313,29 @@ async fn computer_settings(args: Value) -> ToolResult {
                 ToolResult::err("No text to type")
             } else {
                 type_text_win(value);
-                ToolResult::ok(format!("Typed: {}", &value[..value.len().min(60)]))
+                ToolResult::ok(format!("Typed: {}", truncate_chars(value, 60)))
             }
         }
-        "screenshot" => { hotkey(&["win", "shift", "s"]); ToolResult::ok("Screenshot tool opened") }
-        "lock_screen" => { hotkey(&["win", "l"]); ToolResult::ok("Screen locked") }
-        "open_settings" => { hotkey(&["win", "i"]); ToolResult::ok("Settings opened") }
-        "file_explorer" => { hotkey(&["win", "e"]); ToolResult::ok("File Explorer opened") }
-        "open_run" => { hotkey(&["win", "r"]); ToolResult::ok("Run dialog opened") }
+        "screenshot" => {
+            hotkey(&["win", "shift", "s"]);
+            ToolResult::ok("Screenshot tool opened")
+        }
+        "lock_screen" => {
+            hotkey(&["win", "l"]);
+            ToolResult::ok("Screen locked")
+        }
+        "open_settings" => {
+            hotkey(&["win", "i"]);
+            ToolResult::ok("Settings opened")
+        }
+        "file_explorer" => {
+            hotkey(&["win", "e"]);
+            ToolResult::ok("File Explorer opened")
+        }
+        "open_run" => {
+            hotkey(&["win", "r"]);
+            ToolResult::ok("Run dialog opened")
+        }
         "dark_mode" => {
             push_undo(UndoAction::DarkMode);
             dark_mode_toggle()
@@ -192,6 +350,22 @@ async fn computer_settings(args: Value) -> ToolResult {
         )),
     }
 }
+
+#[cfg(windows)]
+pub fn send_media_key(stop: bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_MEDIA_PLAY_PAUSE, VK_MEDIA_STOP};
+    let vk = if stop {
+        VK_MEDIA_STOP.0
+    } else {
+        VK_MEDIA_PLAY_PAUSE.0
+    };
+    send_key(vk, true);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    send_key(vk, false);
+}
+
+#[cfg(not(windows))]
+pub fn send_media_key(_stop: bool) {}
 
 #[cfg(windows)]
 fn key_to_vk(name: &str) -> u16 {
@@ -211,9 +385,18 @@ fn key_to_vk(name: &str) -> u16 {
         "down" => VK_DOWN.0,
         "left" => VK_LEFT.0,
         "right" => VK_RIGHT.0,
-        "f1" => VK_F1.0, "f2" => VK_F2.0, "f3" => VK_F3.0, "f4" => VK_F4.0,
-        "f5" => VK_F5.0, "f6" => VK_F6.0, "f7" => VK_F7.0, "f8" => VK_F8.0,
-        "f9" => VK_F9.0, "f10" => VK_F10.0, "f11" => VK_F11.0, "f12" => VK_F12.0,
+        "f1" => VK_F1.0,
+        "f2" => VK_F2.0,
+        "f3" => VK_F3.0,
+        "f4" => VK_F4.0,
+        "f5" => VK_F5.0,
+        "f6" => VK_F6.0,
+        "f7" => VK_F7.0,
+        "f8" => VK_F8.0,
+        "f9" => VK_F9.0,
+        "f10" => VK_F10.0,
+        "f11" => VK_F11.0,
+        "f12" => VK_F12.0,
         "ctrl" | "control" => VK_CONTROL.0,
         "alt" => VK_MENU.0,
         "shift" => VK_SHIFT.0,
@@ -221,10 +404,20 @@ fn key_to_vk(name: &str) -> u16 {
         "volumeup" => VK_VOLUME_UP.0,
         "volumedown" => VK_VOLUME_DOWN.0,
         "volumemute" => VK_VOLUME_MUTE.0,
+        "mediaplaypause" => VK_MEDIA_PLAY_PAUSE.0,
+        "mediastop" => VK_MEDIA_STOP.0,
         "=" | "equal" => VK_OEM_PLUS.0,
         "-" | "minus" => VK_OEM_MINUS.0,
-        "0" => 0x30, "1" => 0x31, "2" => 0x32, "3" => 0x33, "4" => 0x34,
-        "5" => 0x35, "6" => 0x36, "7" => 0x37, "8" => 0x38, "9" => 0x39,
+        "0" => 0x30,
+        "1" => 0x31,
+        "2" => 0x32,
+        "3" => 0x33,
+        "4" => 0x34,
+        "5" => 0x35,
+        "6" => 0x36,
+        "7" => 0x37,
+        "8" => 0x38,
+        "9" => 0x39,
         s if s.len() == 1 => {
             let c = s.chars().next().unwrap().to_ascii_uppercase();
             if c.is_ascii_alphabetic() { c as u16 } else { 0 }
@@ -261,7 +454,9 @@ fn send_key(vk: u16, down: bool) {
 #[cfg(windows)]
 fn key(name: &str) {
     let vk = key_to_vk(name);
-    if vk == 0 { return; }
+    if vk == 0 {
+        return;
+    }
     send_key(vk, true);
     std::thread::sleep(std::time::Duration::from_millis(30));
     send_key(vk, false);
@@ -280,12 +475,16 @@ fn keys(names: &[&str]) {
 fn hotkey(names: &[&str]) {
     let vks: Vec<u16> = names.iter().map(|n| key_to_vk(n)).collect();
     for &vk in &vks {
-        if vk != 0 { send_key(vk, true); }
+        if vk != 0 {
+            send_key(vk, true);
+        }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
     for &vk in vks.iter().rev() {
-        if vk != 0 { send_key(vk, false); }
+        if vk != 0 {
+            send_key(vk, false);
+        }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
@@ -314,14 +513,13 @@ fn scroll(amount: i32) {
 #[cfg(windows)]
 fn type_text_win(text: &str) {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
-    for ch in text.chars() {
-        let code = ch as u32;
+    for ch in text.encode_utf16() {
         let down = INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
                     wVk: VIRTUAL_KEY(0),
-                    wScan: code as u16,
+                    wScan: ch,
                     dwFlags: KEYEVENTF_UNICODE,
                     time: 0,
                     dwExtraInfo: 0,
@@ -333,7 +531,7 @@ fn type_text_win(text: &str) {
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
                     wVk: VIRTUAL_KEY(0),
-                    wScan: code as u16,
+                    wScan: ch,
                     dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
                     time: 0,
                     dwExtraInfo: 0,
@@ -343,7 +541,7 @@ fn type_text_win(text: &str) {
         unsafe {
             SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(15));
     }
 }
 
@@ -361,18 +559,16 @@ fn volume_set(value: &str) -> ToolResult {
 
 #[cfg(windows)]
 fn set_volume_com(scalar: f32) -> Result<(), String> {
-    use windows::Win32::Media::Audio::*;
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+    use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-        let enumerator: IMMDeviceEnumerator = CoCreateInstance(
-            &MMDeviceEnumerator,
-            None,
-            CLSCTX_ALL,
-        ).map_err(|e| format!("CoCreateInstance: {e}"))?;
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| format!("CoCreateInstance: {e}"))?;
 
         let device = enumerator
             .GetDefaultAudioEndpoint(eRender, eConsole)
@@ -405,7 +601,11 @@ fn brightness_change(delta: i32) -> ToolResult {
         )
     };
     match powershell_no_window(&cmd) {
-        Ok(_) => ToolResult::ok(if delta > 0 { "Brightness increased" } else { "Brightness decreased" }),
+        Ok(_) => ToolResult::ok(if delta > 0 {
+            "Brightness increased"
+        } else {
+            "Brightness decreased"
+        }),
         Err(e) => ToolResult::err(format!("Brightness change failed: {e}")),
     }
 }
@@ -415,9 +615,9 @@ fn sleep_display() -> ToolResult {
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::SendMessageW(
             windows::Win32::Foundation::HWND(0xFFFF as *mut _),
-            0x0112, // WM_SYSCOMMAND
-            Some(windows::Win32::Foundation::WPARAM(0xF170)), // SC_MONITORPOWER
-            Some(windows::Win32::Foundation::LPARAM(2)), // 2 = off
+            0x0112,
+            Some(windows::Win32::Foundation::WPARAM(0xF170)),
+            Some(windows::Win32::Foundation::LPARAM(2)),
         );
     }
     ToolResult::ok("Display sleeping")
@@ -435,7 +635,11 @@ fn dark_mode_toggle() -> ToolResult {
     match powershell_no_window(cmd) {
         Ok(out) => {
             let msg = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            ToolResult::ok(if msg.is_empty() { "Dark mode toggled".to_string() } else { msg })
+            ToolResult::ok(if msg.is_empty() {
+                "Dark mode toggled".to_string()
+            } else {
+                msg
+            })
         }
         Err(e) => ToolResult::err(format!("Dark mode toggle failed: {e}")),
     }
@@ -445,15 +649,15 @@ fn dark_mode_toggle() -> ToolResult {
 fn powershell_no_window(cmd: &str) -> std::io::Result<std::process::Output> {
     use std::os::windows::process::CommandExt;
     std::process::Command::new("powershell")
-        .args(["-Command", cmd])
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .args(["-NoProfile", "-Command", cmd])
+        .creation_flags(0x08000000)
         .output()
 }
 
 #[cfg(not(windows))]
 fn powershell_no_window(cmd: &str) -> std::io::Result<std::process::Output> {
     std::process::Command::new("powershell")
-        .args(["-Command", cmd])
+        .args(["-NoProfile", "-Command", cmd])
         .output()
 }
 
@@ -476,7 +680,11 @@ fn toggle_wifi() -> ToolResult {
             if !err.is_empty() && msg.is_empty() {
                 ToolResult::err(format!("WiFi toggle failed: {err}"))
             } else {
-                ToolResult::ok(if msg.is_empty() { "WiFi toggled".to_string() } else { msg })
+                ToolResult::ok(if msg.is_empty() {
+                    "WiFi toggled".to_string()
+                } else {
+                    msg
+                })
             }
         }
         Err(e) => ToolResult::err(format!("WiFi toggle failed: {e}")),
@@ -487,7 +695,11 @@ fn run_system_cmd(cmd: &str) -> ToolResult {
     match powershell_no_window(cmd) {
         Ok(out) => {
             let msg = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            ToolResult::ok(if msg.is_empty() { format!("Executed: {cmd}") } else { msg })
+            ToolResult::ok(if msg.is_empty() {
+                format!("Executed: {cmd}")
+            } else {
+                msg
+            })
         }
         Err(e) => ToolResult::err(format!("Command failed: {e}")),
     }
@@ -504,6 +716,10 @@ fn scroll(_: i32) {}
 #[cfg(not(windows))]
 fn type_text_win(_: &str) {}
 #[cfg(not(windows))]
-fn set_volume_com(_: f32) -> Result<(), String> { Err("Windows only".into()) }
+fn set_volume_com(_: f32) -> Result<(), String> {
+    Err("Windows only".into())
+}
 #[cfg(not(windows))]
-fn sleep_display() -> ToolResult { ToolResult::err("Windows only") }
+fn sleep_display() -> ToolResult {
+    ToolResult::err("Windows only")
+}

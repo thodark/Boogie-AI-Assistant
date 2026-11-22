@@ -13,6 +13,10 @@ pub struct ToolDeclaration {
 pub struct ToolResult {
     pub output: String,
     pub is_error: bool,
+    /// Optional JPEG image bytes to push to Gemini Live `realtimeInput` vision stream.
+    pub image_jpeg: Option<Vec<u8>>,
+    /// If set, wraps `output` in `<<<UNTRUSTED source=...>>>` markers before returning to the model.
+    pub untrusted_source: Option<&'static str>,
 }
 
 impl ToolResult {
@@ -20,6 +24,26 @@ impl ToolResult {
         Self {
             output: output.into(),
             is_error: false,
+            image_jpeg: None,
+            untrusted_source: None,
+        }
+    }
+
+    pub fn ok_untrusted(source: &'static str, output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            is_error: false,
+            image_jpeg: None,
+            untrusted_source: Some(source),
+        }
+    }
+
+    pub fn ok_with_image(output: impl Into<String>, jpeg: Vec<u8>) -> Self {
+        Self {
+            output: output.into(),
+            is_error: false,
+            image_jpeg: Some(jpeg),
+            untrusted_source: None,
         }
     }
 
@@ -27,11 +51,26 @@ impl ToolResult {
         Self {
             output: output.into(),
             is_error: true,
+            image_jpeg: None,
+            untrusted_source: None,
+        }
+    }
+
+    pub fn is_untrusted(&self) -> bool {
+        self.untrusted_source.is_some()
+    }
+
+    pub fn formatted_for_model(&self) -> String {
+        if let Some(src) = self.untrusted_source {
+            crate::util::wrap_untrusted(src, &self.output)
+        } else {
+            self.output.clone()
         }
     }
 }
 
-pub type ToolHandler = Box<dyn Fn(Value) -> futures_util::future::BoxFuture<'static, ToolResult> + Send + Sync>;
+pub type ToolHandler =
+    Box<dyn Fn(Value) -> futures_util::future::BoxFuture<'static, ToolResult> + Send + Sync>;
 
 pub struct ToolRegistry {
     declarations: Vec<ToolDeclaration>,

@@ -33,9 +33,15 @@ fn resolve_platform(raw: &str) -> (&str, PlatformKind) {
     } else if lower.contains("signal") {
         ("Signal", PlatformKind::DesktopApp)
     } else if lower.contains("instagram") || lower.contains("ig") || lower.contains("insta") {
-        ("Instagram", PlatformKind::BrowserUrl("https://www.instagram.com/direct/new/"))
+        (
+            "Instagram",
+            PlatformKind::BrowserUrl("https://www.instagram.com/direct/new/"),
+        )
     } else if lower.contains("messenger") || lower.contains("facebook") || lower.contains("fb") {
-        ("Messenger", PlatformKind::BrowserUrl("https://www.messenger.com/"))
+        (
+            "Messenger",
+            PlatformKind::BrowserUrl("https://www.messenger.com/"),
+        )
     } else {
         (raw, PlatformKind::DesktopApp)
     }
@@ -135,7 +141,10 @@ fn hotkey(modifier: u16, key: u16) {
         },
     };
     unsafe {
-        SendInput(&[mod_down, key_down, key_up, mod_up], std::mem::size_of::<INPUT>() as i32);
+        SendInput(
+            &[mod_down, key_down, key_up, mod_up],
+            std::mem::size_of::<INPUT>() as i32,
+        );
     }
 }
 
@@ -176,13 +185,13 @@ fn type_unicode(text: &str) {
 
 #[cfg(windows)]
 fn paste_text(text: &str) {
-    if let Ok(mut clip) = arboard::Clipboard::new() {
-        if clip.set_text(text).is_ok() {
-            sleep_ms(150);
-            hotkey(0x11, 0x56); // Ctrl+V
-            sleep_ms(100);
-            return;
-        }
+    if let Ok(mut clip) = arboard::Clipboard::new()
+        && clip.set_text(text).is_ok()
+    {
+        sleep_ms(150);
+        hotkey(0x11, 0x56); // Ctrl+V
+        sleep_ms(100);
+        return;
     }
     type_unicode(text);
 }
@@ -249,9 +258,7 @@ fn desktop_send(app_name: &str, receiver: &str, message: &str) -> ToolResult {
 #[cfg(windows)]
 fn browser_send(url: &str, platform: &str, receiver: &str, message: &str) -> ToolResult {
     if !open_browser_url(url) {
-        return ToolResult::err(format!(
-            "{platform} could not be opened in the browser."
-        ));
+        return ToolResult::err(format!("{platform} could not be opened in the browser."));
     }
 
     paste_text(receiver);
@@ -283,9 +290,24 @@ fn browser_send(url: &str, platform: &str, receiver: &str, message: &str) -> Too
 }
 
 async fn send_message(args: Value) -> ToolResult {
-    let receiver = args.get("receiver").and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
-    let message_text = args.get("message_text").and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
-    let platform_raw = args.get("platform").and_then(|v| v.as_str()).unwrap_or("whatsapp").trim().to_string();
+    let receiver = args
+        .get("receiver")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let message_text = args
+        .get("message_text")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let platform_raw = args
+        .get("platform")
+        .and_then(|v| v.as_str())
+        .unwrap_or("whatsapp")
+        .trim()
+        .to_string();
 
     if receiver.is_empty() {
         return ToolResult::err("No recipient was given.");
@@ -301,11 +323,9 @@ async fn send_message(args: Value) -> ToolResult {
         let recv = receiver.clone();
         let msg = message_text.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
-            match kind {
-                PlatformKind::DesktopApp => desktop_send(&name, &recv, &msg),
-                PlatformKind::BrowserUrl(url) => browser_send(url, &name, &recv, &msg),
-            }
+        let result = tokio::task::spawn_blocking(move || match kind {
+            PlatformKind::DesktopApp => desktop_send(&name, &recv, &msg),
+            PlatformKind::BrowserUrl(url) => browser_send(url, &name, &recv, &msg),
         })
         .await;
 

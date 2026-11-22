@@ -1,4 +1,5 @@
 use crate::tools::{ToolRegistry, ToolResult};
+use crate::util::encode_rgba_to_jpeg;
 use serde_json::Value;
 
 use super::{param, tool};
@@ -6,22 +7,33 @@ use super::{param, tool};
 pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         tool(
-            "take_screenshot",
-            "Capture the screen and return as base64 PNG",
-            vec![("monitor", param("monitor", "integer", "Monitor index (0-based)"))],
+            "screen_process",
+            "Capture the user's computer screen and send the image to your vision input so you can see and answer questions about what is currently on screen.",
+            vec![("monitor", param("monitor", "integer", "Monitor index (0-based, default 0)"))],
             vec![],
         ),
-        Box::new(|args| Box::pin(take_screenshot(args))),
+        Box::new(|args| Box::pin(capture_screen_vision(args))),
     );
 
     registry.register(
         tool(
             "click_screen",
-            "Click at screen coordinates",
+            "Click at screen coordinates (matching the DPI-aware physical pixels of the screen).",
             vec![
                 ("x", param("x", "integer", "X coordinate")),
                 ("y", param("y", "integer", "Y coordinate")),
-                ("button", param("button", "string", "left, right, or middle")),
+                (
+                    "button",
+                    param("button", "string", "left, right, or middle (default: left)"),
+                ),
+                (
+                    "monitor",
+                    param(
+                        "monitor",
+                        "integer",
+                        "Optional 0-based monitor index if coordinates are relative to a monitor",
+                    ),
+                ),
             ],
             vec!["x", "y"],
         ),
@@ -31,7 +43,7 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         tool(
             "type_text",
-            "Type text using keyboard simulation",
+            "Type text using keyboard simulation (supports full Unicode / Vietnamese).",
             vec![("text", param("text", "string", "Text to type"))],
             vec!["text"],
         ),
@@ -41,225 +53,272 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         tool(
             "press_key",
-            "Press a keyboard key or combination",
-            vec![("keys", param("keys", "string", "Key combination like ctrl+c"))],
+            "Press a keyboard key or combination (e.g. ctrl+c, alt+tab, enter).",
+            vec![(
+                "keys",
+                param("keys", "string", "Key combination like ctrl+c"),
+            )],
             vec!["keys"],
         ),
         Box::new(|args| Box::pin(press_key(args))),
     );
 }
 
-async fn take_screenshot(args: Value) -> ToolResult {
+async fn capture_screen_vision(args: Value) -> ToolResult {
     let monitor = args.get("monitor").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    match screenshots::Screen::all() {
+
+    tokio::task::spawn_blocking(move || match screenshots::Screen::all() {
         Ok(screens) => {
             if let Some(screen) = screens.get(monitor) {
+                let info = screen.display_info;
                 match screen.capture() {
                     Ok(img) => {
-                        use image::ImageEncoder;
-                        let mut png_buf = Vec::new();
-                        let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
-                        let (w, h) = (img.width(), img.height());
-                        match encoder.write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8) {
-                            Ok(_) => {
-                                use base64::Engine as _;
-                                let b64 = base64::engine::general_purpose::STANDARD.encode(&png_buf);
-                                ToolResult::ok(format!("data:image/png;base64,{b64}"))
+                        let (orig_w, orig_h) = (img.width(), img.height());
+                        match encode_rgba_to_jpeg(img.as_raw(), orig_w, orig_h, 1280, 80) {
+                            Ok((jpeg, out_w, out_h)) => {
+                                let kb = jpeg.len() / 1024;
+                                ToolResult::ok_with_image(
+                                    format!(
+                                        "Screen capture of monitor {monitor} ({orig_w}x{orig_h}, scale {:.2}, resized to {out_w}x{out_h}, {kb} KB JPEG) sent to your vision input. Describe or act on what you see.",
+                                        info.scale_factor
+                                    ),
+                                    jpeg,
+                                )
                             }
-                            Err(e) => ToolResult::err(format!("png encode: {e}")),
+                            Err(e) => ToolResult::err(format!("jpeg encode: {e}")),
                         }
                     }
                     Err(e) => ToolResult::err(format!("capture failed: {e}")),
                 }
             } else {
-                ToolResult::err(format!("monitor {monitor} not found"))
+                ToolResult::err(format!("monitor {monitor} not found ({} available)", screens.len()))
             }
         }
         Err(e) => ToolResult::err(format!("screen list failed: {e}")),
-    }
+    })
+    .await
+    .unwrap_or_else(|e| ToolResult::err(format!("screen capture task failed: {e}")))
 }
 
 async fn click_screen(args: Value) -> ToolResult {
-    let _x = args.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
-    let _y = args.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
-    let _button = args
+    let raw_x = args.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let raw_y = args.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let button = args
         .get("button")
         .and_then(|v| v.as_str())
-        .unwrap_or("left");
+        .unwrap_or("left")
+        .to_lowercase();
+    let monitor_idx = args
+        .get("monitor")
+        .and_then(|v| v.as_u64())
+        .map(|m| m as usize);
 
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Input::KeyboardAndMouse::*;
-        use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
-        unsafe {
-            let _ = SetCursorPos(_x as i32, _y as i32);
-            let _flags = match _button {
-                "right" => MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_RIGHTUP,
-                "middle" => MOUSEEVENTF_MIDDLEDOWN | MOUSEEVENTF_MIDDLEUP,
-                _ => MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_LEFTUP,
-            };
-            let down = INPUT {
-                r#type: INPUT_MOUSE,
-                Anonymous: INPUT_0 {
-                    mi: MOUSEINPUT {
-                        dwFlags: match _button {
-                            "right" => MOUSEEVENTF_RIGHTDOWN,
-                            "middle" => MOUSEEVENTF_MIDDLEDOWN,
-                            _ => MOUSEEVENTF_LEFTDOWN,
-                        },
-                        ..Default::default()
-                    },
-                },
-            };
-            let up = INPUT {
-                r#type: INPUT_MOUSE,
-                Anonymous: INPUT_0 {
-                    mi: MOUSEINPUT {
-                        dwFlags: match _button {
-                            "right" => MOUSEEVENTF_RIGHTUP,
-                            "middle" => MOUSEEVENTF_MIDDLEUP,
-                            _ => MOUSEEVENTF_LEFTUP,
-                        },
-                        ..Default::default()
-                    },
-                },
-            };
-            SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
-        }
-        ToolResult::ok(format!("clicked ({_x}, {_y}) {_button}"))
-    }
+        tokio::task::spawn_blocking(move || {
+            use windows::Win32::UI::Input::KeyboardAndMouse::*;
+            use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
 
-    #[cfg(not(windows))]
-    ToolResult::err("click_screen is Windows-only")
-}
+            // Translate monitor-relative coordinates using physical monitor origin when specified
+            let (x, y) = if let Some(idx) = monitor_idx {
+                if let Ok(screens) = screenshots::Screen::all() {
+                    if let Some(scr) = screens.get(idx) {
+                        let di = scr.display_info;
+                        (di.x + raw_x, di.y + raw_y)
+                    } else {
+                        (raw_x, raw_y)
+                    }
+                } else {
+                    (raw_x, raw_y)
+                }
+            } else {
+                (raw_x, raw_y)
+            };
 
-async fn type_text(args: Value) -> ToolResult {
-    let text = args
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+            let (down_flag, up_flag) = match button.as_str() {
+                "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+                "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+                _ => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            };
 
-    #[cfg(windows)]
-    {
-        use windows::Win32::UI::Input::KeyboardAndMouse::*;
-        for ch in text.encode_utf16() {
             unsafe {
+                let _ = SetCursorPos(x, y);
                 let down = INPUT {
-                    r#type: INPUT_KEYBOARD,
+                    r#type: INPUT_MOUSE,
                     Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wScan: ch,
-                            dwFlags: KEYEVENTF_UNICODE,
+                        mi: MOUSEINPUT {
+                            dwFlags: down_flag,
                             ..Default::default()
                         },
                     },
                 };
                 let up = INPUT {
-                    r#type: INPUT_KEYBOARD,
+                    r#type: INPUT_MOUSE,
                     Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wScan: ch,
-                            dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                        mi: MOUSEINPUT {
+                            dwFlags: up_flag,
                             ..Default::default()
                         },
                     },
                 };
                 SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
             }
-        }
-        ToolResult::ok(format!("typed {} chars", text.len()))
+            ToolResult::ok(format!("clicked ({x}, {y}) {button}"))
+        })
+        .await
+        .unwrap_or_else(|e| ToolResult::err(format!("click task failed: {e}")))
     }
 
     #[cfg(not(windows))]
-    ToolResult::err("type_text is Windows-only")
+    {
+        let _ = (raw_x, raw_y, button, monitor_idx);
+        ToolResult::err("click_screen is Windows-only")
+    }
 }
 
-async fn press_key(args: Value) -> ToolResult {
-    let _keys = args
-        .get("keys")
+async fn type_text(args: Value) -> ToolResult {
+    let text = args
+        .get("text")
         .and_then(|v| v.as_str())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_string();
 
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Input::KeyboardAndMouse::*;
-
-        fn vk_from_name(name: &str) -> u16 {
-            match name.to_lowercase().as_str() {
-                "enter" | "return" => 0x0D,
-                "tab" => 0x09,
-                "escape" | "esc" => 0x1B,
-                "space" => 0x20,
-                "backspace" => 0x08,
-                "delete" | "del" => 0x2E,
-                "up" => 0x26,
-                "down" => 0x28,
-                "left" => 0x25,
-                "right" => 0x27,
-                "home" => 0x24,
-                "end" => 0x23,
-                "pageup" => 0x21,
-                "pagedown" => 0x22,
-                "ctrl" | "control" => 0x11,
-                "alt" => 0x12,
-                "shift" => 0x10,
-                "win" | "windows" | "super" => 0x5B,
-                "f1" => 0x70,
-                "f2" => 0x71,
-                "f3" => 0x72,
-                "f4" => 0x73,
-                "f5" => 0x74,
-                "f6" => 0x75,
-                "f7" => 0x76,
-                "f8" => 0x77,
-                "f9" => 0x78,
-                "f10" => 0x79,
-                "f11" => 0x7A,
-                "f12" => 0x7B,
-                s if s.len() == 1 => s.chars().next().unwrap().to_ascii_uppercase() as u16,
-                _ => 0,
+        tokio::task::spawn_blocking(move || {
+            use windows::Win32::UI::Input::KeyboardAndMouse::*;
+            for ch in text.encode_utf16() {
+                unsafe {
+                    let down = INPUT {
+                        r#type: INPUT_KEYBOARD,
+                        Anonymous: INPUT_0 {
+                            ki: KEYBDINPUT {
+                                wScan: ch,
+                                dwFlags: KEYEVENTF_UNICODE,
+                                ..Default::default()
+                            },
+                        },
+                    };
+                    let up = INPUT {
+                        r#type: INPUT_KEYBOARD,
+                        Anonymous: INPUT_0 {
+                            ki: KEYBDINPUT {
+                                wScan: ch,
+                                dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                                ..Default::default()
+                            },
+                        },
+                    };
+                    SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
+                }
             }
-        }
-
-        let parts: Vec<&str> = _keys.split('+').collect();
-        let mut inputs = Vec::new();
-
-        for part in &parts {
-            let vk = vk_from_name(part.trim());
-            if vk == 0 {
-                return ToolResult::err(format!("unknown key: {part}"));
-            }
-            inputs.push(INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(vk),
-                        ..Default::default()
-                    },
-                },
-            });
-        }
-
-        for part in parts.iter().rev() {
-            let vk = vk_from_name(part.trim());
-            inputs.push(INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(vk),
-                        dwFlags: KEYEVENTF_KEYUP,
-                        ..Default::default()
-                    },
-                },
-            });
-        }
-
-        unsafe {
-            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-        }
-        ToolResult::ok(format!("pressed {_keys}"))
+            ToolResult::ok(format!("typed {} chars", text.chars().count()))
+        })
+        .await
+        .unwrap_or_else(|e| ToolResult::err(format!("type task failed: {e}")))
     }
 
     #[cfg(not(windows))]
-    ToolResult::err("press_key is Windows-only")
+    {
+        let _ = text;
+        ToolResult::err("type_text is Windows-only")
+    }
+}
+
+async fn press_key(args: Value) -> ToolResult {
+    let keys = args
+        .get("keys")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    #[cfg(windows)]
+    {
+        tokio::task::spawn_blocking(move || {
+            use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+            fn vk_from_name(name: &str) -> u16 {
+                match name.to_lowercase().as_str() {
+                    "enter" | "return" => 0x0D,
+                    "tab" => 0x09,
+                    "escape" | "esc" => 0x1B,
+                    "space" => 0x20,
+                    "backspace" => 0x08,
+                    "delete" | "del" => 0x2E,
+                    "up" => 0x26,
+                    "down" => 0x28,
+                    "left" => 0x25,
+                    "right" => 0x27,
+                    "home" => 0x24,
+                    "end" => 0x23,
+                    "pageup" => 0x21,
+                    "pagedown" => 0x22,
+                    "ctrl" | "control" => 0x11,
+                    "alt" => 0x12,
+                    "shift" => 0x10,
+                    "win" | "windows" | "super" => 0x5B,
+                    "f1" => 0x70,
+                    "f2" => 0x71,
+                    "f3" => 0x72,
+                    "f4" => 0x73,
+                    "f5" => 0x74,
+                    "f6" => 0x75,
+                    "f7" => 0x76,
+                    "f8" => 0x77,
+                    "f9" => 0x78,
+                    "f10" => 0x79,
+                    "f11" => 0x7A,
+                    "f12" => 0x7B,
+                    s if s.len() == 1 => s.chars().next().unwrap().to_ascii_uppercase() as u16,
+                    _ => 0,
+                }
+            }
+
+            let parts: Vec<&str> = keys.split('+').collect();
+            let mut inputs = Vec::new();
+
+            for part in &parts {
+                let vk = vk_from_name(part.trim());
+                if vk == 0 {
+                    return ToolResult::err(format!("unknown key: {part}"));
+                }
+                inputs.push(INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(vk),
+                            ..Default::default()
+                        },
+                    },
+                });
+            }
+
+            for part in parts.iter().rev() {
+                let vk = vk_from_name(part.trim());
+                inputs.push(INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(vk),
+                            dwFlags: KEYEVENTF_KEYUP,
+                            ..Default::default()
+                        },
+                    },
+                });
+            }
+
+            unsafe {
+                SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            }
+            ToolResult::ok(format!("pressed {keys}"))
+        })
+        .await
+        .unwrap_or_else(|e| ToolResult::err(format!("press_key task failed: {e}")))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = keys;
+        ToolResult::err("press_key is Windows-only")
+    }
 }

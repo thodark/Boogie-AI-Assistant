@@ -1,3 +1,4 @@
+use chrono::Timelike;
 use std::time::Instant;
 
 pub struct ProactiveEngine {
@@ -9,13 +10,13 @@ pub struct ProactiveEngine {
 }
 
 impl ProactiveEngine {
-    pub fn new() -> Self {
+    pub fn new(enabled: bool) -> Self {
         Self {
             min_silence_secs: 900.0,
             check_cooldown: 1200.0,
             last_triggered: Instant::now(),
             rotation: 0,
-            enabled: true,
+            enabled,
         }
     }
 
@@ -34,11 +35,7 @@ impl ProactiveEngine {
         self.rotation += 1;
     }
 
-    pub fn build_prompt(
-        &self,
-        memory: &crate::config::Memory,
-        recent_turns: &[String],
-    ) -> String {
+    pub fn build_prompt(&self, memory: &crate::config::Memory, recent_turns: &[String]) -> String {
         let now = chrono::Local::now();
         let time_str = now.format("%A, %B %d, %Y — %I:%M %p").to_string();
         let hour = now.hour();
@@ -58,18 +55,29 @@ impl ProactiveEngine {
         };
 
         let focus = match self.rotation % 3 {
-            0 => "Focus on the user's active projects or goals if any are stored. \
-                  Ask how something is going, or offer a relevant tip.",
-            1 => "Focus on the time of day and the user's wellbeing. \
-                  A warm check-in, a reminder to take a break, or something timely.",
-            _ => "Focus on something genuinely interesting or useful — \
-                  a fact, a suggestion, or a question based on what you know about this person.",
+            0 => {
+                "Focus on the user's active projects or goals if any are stored. \
+                  Ask how something is going, or offer a relevant tip."
+            }
+            1 => {
+                "Focus on the time of day and the user's wellbeing. \
+                  A warm check-in, a reminder to take a break, or something timely."
+            }
+            _ => {
+                "Focus on something genuinely interesting or useful — \
+                  a fact, a suggestion, or a question based on what you know about this person."
+            }
         };
 
         let recent_ctx = if recent_turns.is_empty() {
             String::new()
         } else {
-            let snippet: Vec<&str> = recent_turns.iter().rev().take(6).map(|s| s.as_str()).collect();
+            let snippet: Vec<&str> = recent_turns
+                .iter()
+                .rev()
+                .take(6)
+                .map(|s| s.as_str())
+                .collect();
             let snippet: Vec<&str> = snippet.into_iter().rev().collect();
             format!("\nRecent conversation:\n{}", snippet.join("\n"))
         };
@@ -97,5 +105,3 @@ impl ProactiveEngine {
         )
     }
 }
-
-use chrono::Timelike;

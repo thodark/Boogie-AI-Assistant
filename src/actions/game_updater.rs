@@ -13,9 +13,22 @@ pub fn register(registry: &mut ToolRegistry) {
              updating games, listing installed games, checking download status. \
              ALWAYS call directly for any Steam/game request. NEVER use browser_control or web_search for Steam.",
             vec![
-                ("action", param("action", "string", "update | install | list | download_status (default: update)")),
-                ("game_name", param("game_name", "string", "Game name (partial match supported)")),
-                ("app_id", param("app_id", "string", "Steam AppID for install (optional)")),
+                (
+                    "action",
+                    param(
+                        "action",
+                        "string",
+                        "update | install | list | download_status (default: update)",
+                    ),
+                ),
+                (
+                    "game_name",
+                    param("game_name", "string", "Game name (whole-word match supported)"),
+                ),
+                (
+                    "app_id",
+                    param("app_id", "string", "Steam AppID for install (optional)"),
+                ),
             ],
             vec![],
         ),
@@ -62,6 +75,28 @@ fn known_appids() -> HashMap<&'static str, (&'static str, &'static str)> {
     m
 }
 
+/// Whole-word match helper so "trust" does NOT accidentally match "rust".
+pub fn matches_game_name(candidate: &str, query: &str) -> bool {
+    let cand_tokens: Vec<String> = candidate
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    let query_tokens: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+
+    if query_tokens.is_empty() || cand_tokens.is_empty() {
+        return false;
+    }
+    // Check if every query token appears as a whole word in candidate
+    query_tokens.iter().all(|qt| cand_tokens.contains(qt))
+}
+
 #[cfg(windows)]
 fn find_steam_path() -> Option<PathBuf> {
     use windows::Win32::System::Registry::*;
@@ -80,7 +115,16 @@ fn find_steam_path() -> Option<PathBuf> {
                 let val_name: HSTRING = "InstallPath".into();
                 let mut buf = [0u16; 512];
                 let mut size = (buf.len() * 2) as u32;
-                if RegQueryValueExW(hkey, &val_name, None, None, Some(buf.as_mut_ptr() as *mut u8), Some(&mut size)).is_ok() {
+                if RegQueryValueExW(
+                    hkey,
+                    &val_name,
+                    None,
+                    None,
+                    Some(buf.as_mut_ptr() as *mut u8),
+                    Some(&mut size),
+                )
+                .is_ok()
+                {
                     let len = (size as usize / 2).saturating_sub(1);
                     let path_str = String::from_utf16_lossy(&buf[..len]);
                     let p = PathBuf::from(&path_str);
@@ -94,17 +138,14 @@ fn find_steam_path() -> Option<PathBuf> {
         }
     }
 
-    for p in [
+    [
         PathBuf::from(r"C:\Program Files (x86)\Steam"),
         PathBuf::from(r"C:\Program Files\Steam"),
         PathBuf::from(r"C:\Steam"),
         PathBuf::from(r"D:\Steam"),
-    ] {
-        if p.join("steam.exe").exists() {
-            return Some(p);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|p| p.join("steam.exe").exists())
 }
 
 #[cfg(not(windows))]
@@ -112,6 +153,7 @@ fn find_steam_path() -> Option<PathBuf> {
     None
 }
 
+#[derive(Clone)]
 struct SteamGame {
     id: String,
     name: String,
@@ -148,9 +190,19 @@ fn get_steam_games(steam_path: &Path) -> Vec<SteamGame> {
                     continue;
                 }
                 if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                    let id = id_re.captures(&content).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
-                    let name = name_re.captures(&content).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
-                    let state = state_re.captures(&content).and_then(|c| c.get(1)).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+                    let id = id_re
+                        .captures(&content)
+                        .and_then(|c| c.get(1))
+                        .map(|m| m.as_str().to_string());
+                    let name = name_re
+                        .captures(&content)
+                        .and_then(|c| c.get(1))
+                        .map(|m| m.as_str().to_string());
+                    let state = state_re
+                        .captures(&content)
+                        .and_then(|c| c.get(1))
+                        .and_then(|m| m.as_str().parse().ok())
+                        .unwrap_or(0);
                     if let (Some(id), Some(name)) = (id, name) {
                         games.push(SteamGame { id, name, state });
                     }
@@ -162,35 +214,23 @@ fn get_steam_games(steam_path: &Path) -> Vec<SteamGame> {
 }
 
 fn launch_steam_url(url: &str) {
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", "", url])
-            .spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = open::that(url);
-    }
+    let _ = open::that(url);
 }
 
-fn search_appid(game_name: &str, steam_path: Option<&Path>) -> Option<(String, String)> {
-    let lower = game_name.to_lowercase();
-
-    if let Some(sp) = steam_path {
-        for g in get_steam_games(sp) {
-            if g.name.to_lowercase().contains(&lower) {
-                return Some((g.id, g.name));
-            }
+fn search_appid(game_name: &str, games: &[SteamGame]) -> Option<(String, String)> {
+    for g in games {
+        if matches_game_name(&g.name, game_name) {
+            return Some((g.id.clone(), g.name.clone()));
         }
     }
 
     let known = known_appids();
+    let lower = game_name.trim().to_lowercase();
     if let Some(&(id, name)) = known.get(lower.as_str()) {
         return Some((id.to_string(), name.to_string()));
     }
     for (key, &(id, name)) in &known {
-        if lower.contains(key) || key.contains(&lower.as_str()) {
+        if matches_game_name(key, &lower) || matches_game_name(name, &lower) {
             return Some((id.to_string(), name.to_string()));
         }
     }
@@ -199,30 +239,61 @@ fn search_appid(game_name: &str, steam_path: Option<&Path>) -> Option<(String, S
 }
 
 async fn game_updater(args: Value) -> ToolResult {
-    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("update").to_lowercase();
-    let game_name = args.get("game_name").and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
-    let app_id = args.get("app_id").and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("update")
+        .to_lowercase();
+    let game_name = args
+        .get("game_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let app_id = args
+        .get("app_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
 
-    let steam_path = match find_steam_path() {
-        Some(p) => p,
-        None => return ToolResult::err("Steam is not installed or not found."),
+    let games_opt = tokio::task::spawn_blocking(|| {
+        let steam_path = find_steam_path()?;
+        Some(get_steam_games(&steam_path))
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let Some(games) = games_opt else {
+        return ToolResult::err("Steam is not installed or not found.");
     };
 
     match action.as_str() {
         "list" => {
-            let games = get_steam_games(&steam_path);
             if games.is_empty() {
                 return ToolResult::ok("No Steam games found.");
             }
             let names: Vec<String> = games.iter().take(15).map(|g| g.name.clone()).collect();
-            let suffix = if games.len() > 15 { format!(" and {} more", games.len() - 15) } else { String::new() };
-            ToolResult::ok(format!("Steam ({} games): {}{}", games.len(), names.join(", "), suffix))
+            let suffix = if games.len() > 15 {
+                format!(" and {} more", games.len() - 15)
+            } else {
+                String::new()
+            };
+            ToolResult::ok(format!(
+                "Steam ({} games): {}{}",
+                games.len(),
+                names.join(", "),
+                suffix
+            ))
         }
 
         "download_status" => {
-            let games = get_steam_games(&steam_path);
             let active: Vec<&SteamGame> = games.iter().filter(|g| g.state == 1026).collect();
-            let pending: Vec<&SteamGame> = games.iter().filter(|g| g.state == 6 || g.state == 516).collect();
+            let pending: Vec<&SteamGame> = games
+                .iter()
+                .filter(|g| g.state == 6 || g.state == 516)
+                .collect();
             let mut lines = Vec::new();
             if !active.is_empty() {
                 let names: Vec<&str> = active.iter().map(|g| g.name.as_str()).collect();
@@ -244,33 +315,50 @@ async fn game_updater(args: Value) -> ToolResult {
                 return ToolResult::err("Please specify a game name or app_id to install.");
             }
 
-            let games = get_steam_games(&steam_path);
-            let lower = game_name.to_lowercase();
-            let already = games.iter().find(|g| g.name.to_lowercase().contains(&lower));
-
-            if let Some(g) = already {
+            if !game_name.is_empty()
+                && let Some(g) = games
+                    .iter()
+                    .find(|g| matches_game_name(&g.name, &game_name))
+            {
                 if g.state == 4 {
-                    return ToolResult::ok(format!("'{}' is already installed and up to date.", g.name));
+                    return ToolResult::ok(format!(
+                        "'{}' is already installed and up to date.",
+                        g.name
+                    ));
                 }
                 launch_steam_url(&format!("steam://update/{}", g.id));
-                return ToolResult::ok(format!("'{}' has a pending update. Update started.", g.name));
+                return ToolResult::ok(format!(
+                    "'{}' has a pending update. Update started.",
+                    g.name
+                ));
             }
 
             let final_id = if !app_id.is_empty() {
                 app_id.clone()
             } else {
-                match search_appid(&game_name, Some(&steam_path)) {
+                match search_appid(&game_name, &games) {
                     Some((id, _)) => id,
-                    None => return ToolResult::err(format!("Could not find '{}' on Steam. Try providing the AppID.", game_name)),
+                    None => {
+                        return ToolResult::err(format!(
+                            "Could not find '{}' on Steam. Try providing the AppID.",
+                            game_name
+                        ));
+                    }
                 }
             };
 
             launch_steam_url(&format!("steam://install/{final_id}"));
-            ToolResult::ok(format!("Install started for '{}'. Steam will open the download dialog.", if game_name.is_empty() { &app_id } else { &game_name }))
+            ToolResult::ok(format!(
+                "Install started for '{}'. Steam will open the download dialog.",
+                if game_name.is_empty() {
+                    &app_id
+                } else {
+                    &game_name
+                }
+            ))
         }
 
-        "update" | _ => {
-            let games = get_steam_games(&steam_path);
+        _ => {
             if games.is_empty() {
                 return ToolResult::ok("No Steam games found.");
             }
@@ -278,11 +366,18 @@ async fn game_updater(args: Value) -> ToolResult {
             let targets: Vec<&SteamGame> = if game_name.is_empty() {
                 games.iter().collect()
             } else {
-                let lower = game_name.to_lowercase();
-                let matched: Vec<&SteamGame> = games.iter().filter(|g| g.name.to_lowercase().contains(&lower)).collect();
+                let matched: Vec<&SteamGame> = games
+                    .iter()
+                    .filter(|g| matches_game_name(&g.name, &game_name))
+                    .collect();
                 if matched.is_empty() {
-                    let available: Vec<&str> = games.iter().take(5).map(|g| g.name.as_str()).collect();
-                    return ToolResult::err(format!("Game '{}' not found. Installed: {}...", game_name, available.join(", ")));
+                    let available: Vec<&str> =
+                        games.iter().take(5).map(|g| g.name.as_str()).collect();
+                    return ToolResult::err(format!(
+                        "Game '{}' not found. Installed: {}...",
+                        game_name,
+                        available.join(", ")
+                    ));
                 }
                 matched
             };
@@ -298,7 +393,7 @@ async fn game_updater(args: Value) -> ToolResult {
                     _ => {
                         launch_steam_url(&format!("steam://update/{}", g.id));
                         updated.push(g.name.as_str());
-                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                     }
                 }
             }
@@ -306,8 +401,16 @@ async fn game_updater(args: Value) -> ToolResult {
             let mut parts = Vec::new();
             if !updated.is_empty() {
                 let names: Vec<&str> = updated.iter().take(3).copied().collect();
-                let suffix = if updated.len() > 3 { format!(" and {} more", updated.len() - 3) } else { String::new() };
-                parts.push(format!("Update started for: {}{}", names.join(", "), suffix));
+                let suffix = if updated.len() > 3 {
+                    format!(" and {} more", updated.len() - 3)
+                } else {
+                    String::new()
+                };
+                parts.push(format!(
+                    "Update started for: {}{}",
+                    names.join(", "),
+                    suffix
+                ));
             }
             if !downloading.is_empty() {
                 parts.push(format!("Already updating: {}", downloading.join(", ")));
@@ -326,5 +429,19 @@ async fn game_updater(args: Value) -> ToolResult {
                 ToolResult::ok(parts.join(" "))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whole_word_game_matching_avoids_false_substring_hits() {
+        assert!(matches_game_name("Rust", "rust"));
+        assert!(matches_game_name("Cyberpunk 2077", "cyberpunk"));
+        assert!(matches_game_name("Counter-Strike 2", "counter strike"));
+        assert!(!matches_game_name("Trust No One", "rust"));
+        assert!(!matches_game_name("Rust", "trust"));
     }
 }

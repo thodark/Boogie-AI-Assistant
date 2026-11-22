@@ -1,34 +1,36 @@
-mod screen;
+pub mod background_monitor;
 mod browser;
 mod computer_control;
 mod files;
-mod inline;
-mod reminder;
-mod system;
-mod web;
-mod media;
-mod utils;
-mod youtube;
-mod game_updater;
-mod send_message;
-pub mod background_monitor;
 mod flight_finder;
+mod game_updater;
+mod inline;
+mod media;
+mod reminder;
+mod screen;
+mod send_message;
+mod system;
+mod utils;
 mod video_player;
+mod web;
+mod youtube;
 
+use crate::AppEvent;
 use crate::tools::{ToolDeclaration, ToolRegistry};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use tokio::sync::broadcast;
 
-pub fn register_all(registry: &mut ToolRegistry) {
+pub fn register_all(registry: &mut ToolRegistry, event_tx: broadcast::Sender<AppEvent>) {
     screen::register(registry);
     browser::register(registry);
     computer_control::register(registry);
     files::register(registry);
-    inline::register(registry);
+    inline::register(registry, event_tx.clone());
     reminder::register(registry);
     system::register(registry);
     web::register(registry);
     media::register(registry);
-    utils::register(registry);
+    utils::register(registry, event_tx);
     youtube::register(registry);
     game_updater::register(registry);
     send_message::register(registry);

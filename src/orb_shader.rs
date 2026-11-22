@@ -431,7 +431,9 @@ impl OrbRenderer {
             let vert_src = format!("{header}{VERT_BODY}");
             let frag_src = format!("{header}{FRAG_BODY}");
 
-            let program = gl.create_program().map_err(|e| format!("create_program: {e}"))?;
+            let program = gl
+                .create_program()
+                .map_err(|e| format!("create_program: {e}"))?;
 
             let vs = compile_shader(gl, glow::VERTEX_SHADER, &vert_src)?;
             let fs = match compile_shader(gl, glow::FRAGMENT_SHADER, &frag_src) {
@@ -518,11 +520,7 @@ impl OrbRenderer {
             );
             gl.uniform_2_f32(self.u_resolution.as_ref(), resolution[0], resolution[1]);
             gl.uniform_1_f32(self.u_time.as_ref(), u.time);
-            gl.uniform_2_f32(
-                self.u_orb_center.as_ref(),
-                u.orb_center[0],
-                u.orb_center[1],
-            );
+            gl.uniform_2_f32(self.u_orb_center.as_ref(), u.orb_center[0], u.orb_center[1]);
             gl.uniform_1_f32(self.u_orb_scale.as_ref(), u.orb_scale);
             gl.uniform_1_f32(self.u_audio.as_ref(), u.audio);
             gl.uniform_1_f32(self.u_openness.as_ref(), u.openness);

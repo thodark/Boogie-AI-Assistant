@@ -1,4 +1,5 @@
 use crate::tools::{ToolRegistry, ToolResult};
+use crate::util::http_client;
 use serde_json::Value;
 
 use super::{param, tool};
@@ -7,10 +8,13 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         tool(
             "web_search",
-            "Search the web using DuckDuckGo",
+            "Search the web using DuckDuckGo and return titles, URLs, and snippets.",
             vec![
                 ("query", param("query", "string", "Search query")),
-                ("num_results", param("num_results", "integer", "Number of results (default 5)")),
+                (
+                    "num_results",
+                    param("num_results", "integer", "Number of results (default 5)"),
+                ),
             ],
             vec!["query"],
         ),
@@ -20,8 +24,11 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         tool(
             "get_weather",
-            "Get weather for a location",
-            vec![("location", param("location", "string", "City name or coordinates"))],
+            "Get current weather for a city or location.",
+            vec![(
+                "location",
+                param("location", "string", "City name or coordinates"),
+            )],
             vec!["location"],
         ),
         Box::new(|args| Box::pin(get_weather(args))),
@@ -30,7 +37,7 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         tool(
             "get_news",
-            "Get latest news headlines",
+            "Get latest news headlines for a topic.",
             vec![("topic", param("topic", "string", "News topic"))],
             vec![],
         ),
@@ -38,39 +45,89 @@ pub fn register(registry: &mut ToolRegistry) {
     );
 }
 
+fn extract_ddg_url(href: &str) -> String {
+    if let Some(idx) = href.find("uddg=") {
+        let rest = &href[idx + 5..];
+        let encoded = rest.split('&').next().unwrap_or(rest);
+        if let Ok(decoded) = urlencoding::decode(encoded) {
+            return decoded.into_owned();
+        }
+    }
+    if href.starts_with("//") {
+        format!("https:{href}")
+    } else {
+        href.to_string()
+    }
+}
+
 async fn web_search(args: Value) -> ToolResult {
-    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or_default();
-    let _num = args.get("num_results").and_then(|v| v.as_u64()).unwrap_or(5);
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    if query.is_empty() {
+        return ToolResult::err("No search query provided.");
+    }
+    let num = args
+        .get("num_results")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5)
+        .clamp(1, 10) as usize;
 
     let url = format!(
         "https://html.duckduckgo.com/html/?q={}",
         urlencoding::encode(query)
     );
 
-    match reqwest::get(&url).await {
+    match http_client()
+        .get(&url)
+        .header("Accept-Language", "en-US,en;q=0.9,vi;q=0.8")
+        .send()
+        .await
+    {
         Ok(resp) => match resp.text().await {
             Ok(html) => {
                 let doc = scraper::Html::parse_document(&html);
                 let result_sel = scraper::Selector::parse(".result__a").unwrap();
                 let snippet_sel = scraper::Selector::parse(".result__snippet").unwrap();
 
-                let titles: Vec<String> = doc.select(&result_sel)
-                    .map(|el| el.text().collect::<String>().trim().to_string())
+                let entries: Vec<(String, String)> = doc
+                    .select(&result_sel)
+                    .map(|el| {
+                        let title = el.text().collect::<String>().trim().to_string();
+                        let href = el.value().attr("href").unwrap_or_default();
+                        (title, extract_ddg_url(href))
+                    })
                     .collect();
-                let snippets: Vec<String> = doc.select(&snippet_sel)
+
+                let snippets: Vec<String> = doc
+                    .select(&snippet_sel)
                     .map(|el| el.text().collect::<String>().trim().to_string())
                     .collect();
 
                 let mut results = Vec::new();
-                for (i, title) in titles.iter().enumerate().take(_num as usize) {
+                for (i, (title, link)) in entries.iter().enumerate().take(num) {
                     let snippet = snippets.get(i).cloned().unwrap_or_default();
-                    results.push(format!("{}. {}\n   {}", i + 1, title, snippet));
+                    if link.is_empty() {
+                        results.push(format!("{}. {}\n   {}", i + 1, title, snippet));
+                    } else {
+                        results.push(format!(
+                            "{}. {}\n   URL: {}\n   {}",
+                            i + 1,
+                            title,
+                            link,
+                            snippet
+                        ));
+                    }
                 }
 
                 if results.is_empty() {
-                    ToolResult::ok("No results found.")
+                    ToolResult::ok(
+                        "No results found (DuckDuckGo may have rate-limited this request).",
+                    )
                 } else {
-                    ToolResult::ok(results.join("\n\n"))
+                    ToolResult::ok_untrusted("web", results.join("\n\n"))
                 }
             }
             Err(e) => ToolResult::err(format!("read response: {e}")),
@@ -80,9 +137,14 @@ async fn web_search(args: Value) -> ToolResult {
 }
 
 async fn get_weather(args: Value) -> ToolResult {
-    let location = args.get("location").and_then(|v| v.as_str()).unwrap_or("Hanoi");
-    let url = format!("https://wttr.in/{location}?format=j1");
-    match reqwest::get(&url).await {
+    let location = args
+        .get("location")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Hanoi")
+        .trim();
+    let encoded = urlencoding::encode(location);
+    let url = format!("https://wttr.in/{encoded}?format=j1");
+    match http_client().get(&url).send().await {
         Ok(resp) => match resp.json::<Value>().await {
             Ok(data) => {
                 let current = &data["current_condition"][0];
@@ -101,26 +163,10 @@ async fn get_weather(args: Value) -> ToolResult {
 }
 
 async fn get_news(args: Value) -> ToolResult {
-    let topic = args.get("topic").and_then(|v| v.as_str()).unwrap_or("technology");
+    let topic = args
+        .get("topic")
+        .and_then(|v| v.as_str())
+        .unwrap_or("technology");
     let query = format!("{topic} news");
     web_search(serde_json::json!({"query": query, "num_results": 5})).await
-}
-
-mod urlencoding {
-    pub fn encode(s: &str) -> String {
-        let mut out = String::new();
-        for b in s.bytes() {
-            match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(b as char);
-                }
-                b' ' => out.push('+'),
-                _ => {
-                    out.push('%');
-                    out.push_str(&format!("{b:02X}"));
-                }
-            }
-        }
-        out
-    }
 }

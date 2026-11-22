@@ -1,45 +1,54 @@
-#[allow(dead_code)]
 mod actions;
-#[allow(dead_code)]
 mod audio;
-#[allow(dead_code)]
 mod config;
+mod confirm;
 mod dashboard;
 mod dsp;
-#[allow(dead_code)]
 mod echo;
-#[allow(dead_code)]
 mod gemini;
 mod gui;
 mod orb_shader;
 mod proactive;
-#[allow(dead_code)]
 mod tools;
+mod util;
 
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing_subscriber::EnvFilter;
 
-const SEND_SAMPLE_RATE: u32 = 16_000;
-const RECV_SAMPLE_RATE: u32 = 24_000;
-const STALL_LIMIT_SECS: f64 = 30.0;
+use crate::audio::PlaybackCmd;
+use crate::confirm::PermissionDecision;
+use crate::echo::MicDecision;
+use crate::util::truncate_chars;
+
+pub const SEND_SAMPLE_RATE: u32 = 16_000;
+pub const RECV_SAMPLE_RATE: u32 = 24_000;
+const STALL_LIMIT_SECS: f64 = 45.0;
+const MONITOR_CHECK_INTERVAL_SECS: u64 = 60;
+const MAX_SESSION_AGE_SECS: u64 = 14 * 60; // Proactive clean refresh before 15m audio limit
 
 #[derive(Clone, Debug)]
 pub enum AppEvent {
     StateChange(AppState),
     AudioLevel(f32),
     Log(String),
+    BannerError(Option<String>),
     Visemes(Vec<(f32, f32, f32)>, f64, f64),
-    Reconnect { keep_context: bool, reason: String },
-    ConfirmRequest { title: String, detail: String },
-    Interrupt,
+    ConfirmRequest {
+        request_id: u64,
+        title: String,
+        detail: String,
+    },
+    TimerAlert(String),
     Shutdown,
 }
 
 #[derive(Clone, Debug)]
-pub enum ConfirmResponse {
-    Confirmed,
-    Denied,
+pub struct ConfirmResponse {
+    pub request_id: u64,
+    pub confirmed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,71 +62,107 @@ pub enum AppState {
 pub struct SharedState {
     pub is_speaking: bool,
     pub muted: bool,
+    pub push_to_talk: bool,
+    pub ptt_active: bool,
     pub resume_handle: Option<String>,
     pub session_log: Vec<String>,
-    pub last_user_speech: std::time::Instant,
+    pub last_user_speech: Instant,
 }
 
 impl SharedState {
-    fn new() -> Self {
+    fn new(push_to_talk: bool) -> Self {
         Self {
             is_speaking: false,
             muted: false,
+            push_to_talk,
+            ptt_active: false,
             resume_handle: None,
             session_log: Vec::new(),
-            last_user_speech: std::time::Instant::now(),
+            last_user_speech: Instant::now(),
         }
     }
 }
 
+#[cfg(windows)]
+fn enable_dpi_awareness() {
+    use windows::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+    };
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_dpi_awareness() {}
+
 fn main() {
+    enable_dpi_awareness();
+
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("boogie=debug")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("boogie=info")),
         )
         .init();
 
-    let cfg = match config::ApiConfig::load() {
-        Ok(c) => c,
+    let (initial_cfg, initial_cfg_err) = match config::ApiConfig::load() {
+        Ok(c) => (Some(c), None),
         Err(e) => {
-            eprintln!("config error: {e}");
-            eprintln!("place api_keys.json next to the binary under config/");
-            std::process::exit(1);
+            tracing::warn!("config unavailable at startup (opening setup UI): {e}");
+            (None, Some(e))
         }
     };
 
-    let shared = Arc::new(Mutex::new(SharedState::new()));
+    let initial_ptt = initial_cfg
+        .as_ref()
+        .is_some_and(config::ApiConfig::push_to_talk);
+    let shared = Arc::new(Mutex::new(SharedState::new(initial_ptt)));
+
     let (event_tx, _) = broadcast::channel::<AppEvent>(256);
     let (mic_tx, mic_rx) = mpsc::channel::<Vec<u8>>(200);
-    let (playback_tx, playback_rx) = mpsc::channel::<Vec<u8>>(200);
-    let (confirm_tx, confirm_rx) = mpsc::channel::<ConfirmResponse>(4);
-    let (interrupt_tx, interrupt_rx) = mpsc::channel::<()>(4);
+    let (playback_tx, playback_rx) = mpsc::channel::<PlaybackCmd>(200);
+    let (confirm_tx, confirm_rx) = mpsc::channel::<ConfirmResponse>(8);
+    let (interrupt_tx, interrupt_rx) = mpsc::channel::<()>(8);
+    let (config_tx, config_rx) = mpsc::channel::<config::ApiConfig>(2);
 
-    let _mic_stream = match audio::open_mic(None, mic_tx) {
+    let in_dev = initial_cfg
+        .as_ref()
+        .and_then(|c| audio::find_input_device(c.input_device.as_deref()));
+    let out_dev = initial_cfg
+        .as_ref()
+        .and_then(|c| audio::find_output_device(c.output_device.as_deref()));
+
+    let _mic_stream = match audio::open_mic(in_dev.as_ref(), mic_tx) {
         Ok(s) => {
             tracing::info!("mic opened");
             Some(s)
         }
         Err(e) => {
             tracing::error!("failed to open mic: {e}");
+            let _ = event_tx.send(AppEvent::BannerError(Some(format!("Mic error: {e}"))));
             None
         }
     };
 
-    let _speaker_stream = match audio::open_speaker(None, playback_rx) {
+    let speaker_output = match audio::open_speaker(out_dev.as_ref(), playback_rx) {
         Ok(s) => {
             tracing::info!("speaker opened");
             Some(s)
         }
         Err(e) => {
             tracing::error!("failed to open speaker: {e}");
+            let _ = event_tx.send(AppEvent::BannerError(Some(format!("Speaker error: {e}"))));
             None
         }
     };
 
+    let speaker_queued = speaker_output
+        .as_ref()
+        .map(audio::AudioOutput::queued_samples_handle)
+        .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)));
+
     let mut tool_registry = tools::ToolRegistry::new();
-    actions::register_all(&mut tool_registry);
+    actions::register_all(&mut tool_registry, event_tx.clone());
     let tool_registry = Arc::new(tool_registry);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -125,30 +170,20 @@ fn main() {
         .build()
         .expect("failed to build tokio runtime");
 
-    let event_tx_dash = event_tx.clone();
-    rt.spawn(async move {
-        if let Err(e) = dashboard::run_dashboard(event_tx_dash, 8765).await {
-            tracing::error!("dashboard: {e}");
-        }
-    });
-
-    let event_tx_session = event_tx.clone();
-    let shared_session = shared.clone();
-    let tools_session = tool_registry.clone();
-    let api_key = cfg.api_key().to_string();
-    let voice = cfg.voice().to_string();
-    let cfg_clone = cfg.clone();
+    let event_tx_sup = event_tx.clone();
+    let shared_sup = shared.clone();
+    let tools_sup = tool_registry.clone();
 
     rt.spawn(async move {
-        run_session(
-            api_key,
-            cfg_clone,
-            voice,
-            tools_session,
-            event_tx_session,
-            shared_session,
+        run_supervisor(
+            initial_cfg,
+            config_rx,
+            tools_sup,
+            event_tx_sup,
+            shared_sup,
             mic_rx,
             playback_tx,
+            speaker_queued,
             confirm_rx,
             interrupt_rx,
         )
@@ -157,84 +192,259 @@ fn main() {
 
     tracing::info!("Boogie starting GUI...");
     let gui_rx = event_tx.subscribe();
-    if let Err(e) = gui::run_gui(gui_rx, shared, confirm_tx, interrupt_tx) {
+    if let Err(e) = gui::run_gui(
+        gui_rx,
+        shared,
+        confirm_tx,
+        interrupt_tx,
+        config_tx,
+        initial_cfg_err,
+    ) {
         tracing::error!("gui: {e}");
     }
 }
 
-const CONFIRM_ACTIONS: &[&str] = &[
-    "shutdown", "restart", "reboot", "poweroff", "toggle_wifi",
-    "format ", "del /f", "rm -rf", "rmdir /s",
-];
-
-const CONFIRM_CS_ACTIONS: &[&str] = &["shutdown", "restart", "toggle_wifi"];
-
-fn needs_confirmation(tool_name: &str, args: &serde_json::Value) -> Option<(String, String)> {
-    if tool_name == "run_command" {
-        if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-            let lower = cmd.to_lowercase();
-            for kw in CONFIRM_ACTIONS {
-                if lower.contains(kw) {
-                    return Some((
-                        "Run dangerous command".to_string(),
-                        format!("Command: {cmd}"),
-                    ));
-                }
-            }
-        }
-    }
-    if tool_name == "computer_settings" {
-        if let Some(action) = args.get("action").and_then(|v| v.as_str()) {
-            let lower = action.to_lowercase().replace('-', "_").replace(' ', "_");
-            for kw in CONFIRM_CS_ACTIONS {
-                if lower == *kw {
-                    return Some((
-                        format!("Computer settings: {action}"),
-                        "This action is irreversible".to_string(),
-                    ));
-                }
-            }
-        }
-    }
-    if tool_name == "kill_process" {
-        let target = args.get("name").and_then(|v| v.as_str())
-            .or_else(|| args.get("pid").and_then(|v| v.as_str()))
-            .unwrap_or("?");
-        return Some((
-            "Kill process".to_string(),
-            format!("Target: {target}"),
-        ));
-    }
-    None
-}
-
-async fn run_session(
-    api_key: String,
-    cfg: config::ApiConfig,
-    voice: String,
+#[allow(clippy::too_many_arguments)]
+async fn run_supervisor(
+    initial_cfg: Option<config::ApiConfig>,
+    mut config_rx: mpsc::Receiver<config::ApiConfig>,
     tools: Arc<tools::ToolRegistry>,
     event_tx: broadcast::Sender<AppEvent>,
     shared: Arc<Mutex<SharedState>>,
-    mut mic_rx: mpsc::Receiver<Vec<u8>>,
-    playback_tx: mpsc::Sender<Vec<u8>>,
-    mut confirm_rx: mpsc::Receiver<ConfirmResponse>,
-    mut interrupt_rx: mpsc::Receiver<()>,
+    mic_rx: mpsc::Receiver<Vec<u8>>,
+    playback_tx: mpsc::Sender<PlaybackCmd>,
+    speaker_queued: Arc<AtomicUsize>,
+    confirm_rx: mpsc::Receiver<ConfirmResponse>,
+    interrupt_rx: mpsc::Receiver<()>,
 ) {
-    tracing::info!("run_session starting, api_key len={}", api_key.len());
+    let cfg = match initial_cfg {
+        Some(c) => c,
+        None => {
+            let _ = event_tx.send(AppEvent::StateChange(AppState::Sleeping));
+            match config_rx.recv().await {
+                Some(c) => {
+                    {
+                        let mut s = shared.lock().await;
+                        s.push_to_talk = c.push_to_talk();
+                    }
+                    c
+                }
+                None => return,
+            }
+        }
+    };
+
+    if cfg.dashboard_enabled() {
+        let event_tx_dash = event_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = dashboard::run_dashboard(event_tx_dash, 8765).await {
+                tracing::error!("dashboard: {e}");
+            }
+        });
+    } else {
+        tracing::info!(
+            "local WebSocket dashboard disabled (set dashboard_enabled: true to enable)"
+        );
+    }
+
+    // Wrap channels in Arc<Mutex<...>> so the supervisor can recover cleanly if run_session ever panics
+    let mic_rx = Arc::new(Mutex::new(mic_rx));
+    let confirm_rx = Arc::new(Mutex::new(confirm_rx));
+    let interrupt_rx = Arc::new(Mutex::new(interrupt_rx));
+
+    loop {
+        let cfg_run = cfg.clone();
+        let tools_run = tools.clone();
+        let event_tx_run = event_tx.clone();
+        let shared_run = shared.clone();
+        let mic_rx_run = mic_rx.clone();
+        let playback_tx_run = playback_tx.clone();
+        let speaker_q_run = speaker_queued.clone();
+        let confirm_rx_run = confirm_rx.clone();
+        let interrupt_rx_run = interrupt_rx.clone();
+
+        let handle = tokio::spawn(async move {
+            run_session(
+                cfg_run,
+                tools_run,
+                event_tx_run,
+                shared_run,
+                mic_rx_run,
+                playback_tx_run,
+                speaker_q_run,
+                confirm_rx_run,
+                interrupt_rx_run,
+            )
+            .await
+        });
+
+        match handle.await {
+            Ok(()) => {
+                tracing::info!("session supervisor exiting cleanly on shutdown");
+                break;
+            }
+            Err(join_err) => {
+                tracing::error!("run_session panicked — restarting supervisor: {join_err}");
+                let _ = event_tx.send(AppEvent::BannerError(Some(format!(
+                    "Session recovered from internal error: {join_err}"
+                ))));
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+        }
+    }
+}
+
+struct ToolBatchOutcome {
+    responses: Vec<gemini::FunctionResponse>,
+    vision_frames: Vec<Vec<u8>>,
+    saw_untrusted: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session(
+    cfg: config::ApiConfig,
+    tools: Arc<tools::ToolRegistry>,
+    event_tx: broadcast::Sender<AppEvent>,
+    shared: Arc<Mutex<SharedState>>,
+    mic_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    playback_tx: mpsc::Sender<PlaybackCmd>,
+    speaker_queued: Arc<AtomicUsize>,
+    confirm_rx: Arc<Mutex<mpsc::Receiver<ConfirmResponse>>>,
+    interrupt_rx: Arc<Mutex<mpsc::Receiver<()>>>,
+) {
+    tracing::info!(
+        "run_session starting (model={}, api={}, tools={})",
+        cfg.model(),
+        cfg.api_version(),
+        tools.declarations().len()
+    );
 
     let tool_json = tools.gemini_tool_json();
-    let tools_vec: Vec<serde_json::Value> =
-        serde_json::from_value(tool_json).unwrap_or_default();
+    let tools_vec: Vec<serde_json::Value> = serde_json::from_value(tool_json).unwrap_or_default();
 
-    tracing::info!("registered {} tool declarations", tools_vec.len());
+    let mut backoff_secs: u64 = 2;
+
+    // Dedicated non-blocking tool worker so select! NEVER freezes during slow tools or 90s confirm modals
+    let (tool_job_tx, mut tool_job_rx) = mpsc::channel::<(Vec<gemini::FunctionCall>, bool)>(16);
+    let (tool_done_tx, mut tool_done_rx) = mpsc::channel::<ToolBatchOutcome>(16);
+
+    {
+        let tools_worker = tools.clone();
+        let event_tx_worker = event_tx.clone();
+        let confirm_rx_worker = confirm_rx.clone();
+        tokio::spawn(async move {
+            while let Some((calls, mut saw_untrusted)) = tool_job_rx.recv().await {
+                let mut responses = Vec::new();
+                let mut vision_frames = Vec::new();
+
+                for call in calls {
+                    let args_str = call.args.to_string();
+                    let args_preview = truncate_chars(&args_str, 160);
+                    let _ = event_tx_worker.send(AppEvent::Log(format!(
+                        "tool: {} {}",
+                        call.name, args_preview
+                    )));
+
+                    let decision =
+                        confirm::evaluate_tool_call(&call.name, &call.args, saw_untrusted);
+
+                    let result = match decision {
+                        PermissionDecision::Deny(reason) => {
+                            confirm::write_audit_log(&call.name, "DENIED_POLICY", &reason);
+                            tools::ToolResult::err(reason)
+                        }
+                        PermissionDecision::RequireConfirm { title, detail } => {
+                            let req_id = confirm::next_request_id();
+                            {
+                                // Drain any stale confirmation responses before asking
+                                let mut rx = confirm_rx_worker.lock().await;
+                                while rx.try_recv().is_ok() {}
+                            }
+                            let _ = event_tx_worker.send(AppEvent::ConfirmRequest {
+                                request_id: req_id,
+                                title: title.clone(),
+                                detail: detail.clone(),
+                            });
+                            let _ = event_tx_worker
+                                .send(AppEvent::Log(format!("Waiting for confirmation: {title}")));
+
+                            let confirmed =
+                                await_matching_confirm(&confirm_rx_worker, req_id).await;
+                            match confirmed {
+                                Some(true) => {
+                                    confirm::write_audit_log(&call.name, "APPROVED", &detail);
+                                    let _ = event_tx_worker
+                                        .send(AppEvent::Log("Confirmed".to_string()));
+                                    execute_tool_isolated(&tools_worker, &call.name, call.args)
+                                        .await
+                                }
+                                Some(false) => {
+                                    confirm::write_audit_log(&call.name, "DENIED_USER", &detail);
+                                    let _ = event_tx_worker
+                                        .send(AppEvent::Log("Denied by user".to_string()));
+                                    tools::ToolResult::err("User denied this action.")
+                                }
+                                None => {
+                                    confirm::write_audit_log(&call.name, "TIMEOUT", &detail);
+                                    let _ = event_tx_worker
+                                        .send(AppEvent::Log("Confirmation timed out".to_string()));
+                                    tools::ToolResult::err(
+                                        "Confirmation timed out (90s). Action cancelled.",
+                                    )
+                                }
+                            }
+                        }
+                        PermissionDecision::Allow => {
+                            execute_tool_isolated(&tools_worker, &call.name, call.args).await
+                        }
+                    };
+
+                    if result.is_untrusted() {
+                        saw_untrusted = true;
+                    }
+                    if let Some(jpeg) = result.image_jpeg.clone() {
+                        vision_frames.push(jpeg);
+                    }
+
+                    let formatted = result.formatted_for_model();
+                    let output = if result.is_error {
+                        serde_json::json!({"error": formatted})
+                    } else {
+                        serde_json::json!({"result": formatted})
+                    };
+
+                    responses.push(gemini::FunctionResponse {
+                        id: call.id,
+                        name: call.name,
+                        response: output,
+                    });
+                }
+
+                if tool_done_tx
+                    .send(ToolBatchOutcome {
+                        responses,
+                        vision_frames,
+                        saw_untrusted,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    let mut internal_rx = event_tx.subscribe();
+    let (monitor_tx, mut monitor_rx) = mpsc::channel::<Vec<String>>(4);
 
     loop {
         let resume_handle = {
             let s = shared.lock().await;
             s.resume_handle.clone()
         };
+        let used_resume = resume_handle.is_some();
 
-        // Reload memory every reconnect so newly saved facts appear in context
         let memory = config::load_memory();
         let system_prompt = config::build_full_prompt(
             &cfg,
@@ -243,260 +453,400 @@ async fn run_session(
             cfg.user_name.as_deref(),
         );
 
-        // Collect recent conversation for context injection
         let recent_log: Vec<String> = {
             let s = shared.lock().await;
-            s.session_log.iter().rev().take(30).cloned().collect::<Vec<_>>().into_iter().rev().collect()
+            s.session_log
+                .iter()
+                .rev()
+                .take(30)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
         };
 
         let live_config = gemini::LiveConfig {
-            api_key: api_key.clone(),
+            api_key: cfg.api_key().to_string(),
+            model: cfg.model().to_string(),
+            api_version: cfg.api_version().to_string(),
             system_instruction: system_prompt,
-            voice: voice.clone(),
+            voice: cfg.voice().to_string(),
             tools: tools_vec.clone(),
             resume_handle: resume_handle.clone(),
-            ..Default::default()
         };
 
+        let _ = event_tx.send(AppEvent::StateChange(AppState::Thinking));
         tracing::info!("connecting to Gemini Live...");
-        let session = match gemini::LiveSession::connect(live_config.clone()).await {
+
+        let mut session = match gemini::LiveSession::connect(live_config.clone()).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!("gemini connect: {e}");
+                let _ = event_tx.send(AppEvent::BannerError(Some(format!("Connect error: {e}"))));
                 let _ = event_tx.send(AppEvent::Log(format!("connect failed: {e}")));
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                if used_resume {
+                    shared.lock().await.resume_handle = None;
+                }
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(30);
                 continue;
             }
         };
 
-        let mut session = session;
-
-        tracing::info!("sending setup...");
         if let Err(e) = session.send_setup(&live_config).await {
             tracing::error!("setup failed: {e}");
+            let _ = event_tx.send(AppEvent::BannerError(Some(format!("Setup failed: {e}"))));
+            if used_resume {
+                shared.lock().await.resume_handle = None;
+            }
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+            backoff_secs = (backoff_secs * 2).min(30);
             continue;
         }
 
-        // If no resume handle (fresh session), inject recent conversation context
-        if resume_handle.is_none() && !recent_log.is_empty() {
+        if !used_resume && !recent_log.is_empty() {
             let context = format!(
                 "[CONVERSATION CONTEXT — this is what was said recently, use it to maintain continuity]\n{}",
                 recent_log.join("\n")
             );
             if let Err(e) = session.send_text(&context).await {
                 tracing::warn!("failed to inject context: {e}");
-            } else {
-                tracing::info!("injected {} lines of conversation context", recent_log.len());
             }
         }
 
+        let _ = event_tx.send(AppEvent::BannerError(None));
         let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
         let _ = event_tx.send(AppEvent::Log("connected".to_string()));
 
         let mut echo_guard = echo::EchoGuard::new();
-        let mut last_activity = std::time::Instant::now();
-        let mut proactive = proactive::ProactiveEngine::new();
+        let session_started = Instant::now();
+        let mut last_activity = Instant::now();
+        let mut last_monitor_check = Instant::now();
+        let mut proactive = proactive::ProactiveEngine::new(cfg.proactive_audio());
+        let mut saw_untrusted_in_turn = false;
+        let mut should_shutdown = false;
+
+        // Fixed Bug #2: interval created OUTSIDE the select! loop so watchdog/monitors/proactive actually run
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let mut mic_guard = mic_rx.lock().await;
+        let mut int_guard = interrupt_rx.lock().await;
 
         loop {
             tokio::select! {
-                Some(mic_data) = mic_rx.recv() => {
-                    let is_muted = {
+                Some(mic_data) = mic_guard.recv() => {
+                    let (is_muted, ptt_mode, ptt_active) = {
                         let s = shared.lock().await;
-                        s.muted
+                        (s.muted, s.push_to_talk, s.ptt_active)
                     };
 
                     let samples: Vec<i16> = mic_data
-                        .chunks_exact(2)
-                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|&c| i16::from_le_bytes(c))
                         .collect();
                     let level = dsp::pcm_level(&samples);
                     let _ = event_tx.send(AppEvent::AudioLevel(if is_muted { 0.0 } else { level }));
 
-                    if !is_muted && echo_guard.is_user_speech(&samples, SEND_SAMPLE_RATE, level) {
-                        if let Err(e) = session.send_audio(&mic_data).await {
-                            tracing::error!("send audio: {e}");
-                            break;
+                    if is_muted {
+                        continue;
+                    }
+
+                    let speaker_playing = speaker_queued.load(Ordering::Acquire) > 0;
+                    let decision = if ptt_mode {
+                        if ptt_active {
+                            MicDecision::SendAudio
+                        } else {
+                            echo_guard.evaluate_mic(0.0, speaker_playing, Instant::now())
                         }
-                        last_activity = std::time::Instant::now();
-                        {
-                            let mut s = shared.lock().await;
-                            s.last_user_speech = std::time::Instant::now();
+                    } else {
+                        echo_guard.evaluate_mic(level, speaker_playing, Instant::now())
+                    };
+
+                    match decision {
+                        MicDecision::SendAudio => {
+                            if let Err(e) = session.send_audio(&mic_data).await {
+                                tracing::error!("send audio: {e}");
+                                break;
+                            }
+                            last_activity = Instant::now();
+                            shared.lock().await.last_user_speech = Instant::now();
                         }
+                        MicDecision::SendStreamEnd => {
+                            if let Err(e) = session.send_audio_stream_end().await {
+                                tracing::warn!("send audioStreamEnd: {e}");
+                            }
+                        }
+                        MicDecision::Suppress => {}
                     }
                 }
 
-                Some(event) = session.event_rx.recv() => {
-                    last_activity = std::time::Instant::now();
+                ev = session.event_rx.recv() => {
+                    let Some(event) = ev else {
+                        tracing::warn!("Gemini WebSocket event channel closed — reconnecting");
+                        if used_resume && session_started.elapsed() < Duration::from_secs(10) {
+                            shared.lock().await.resume_handle = None;
+                        }
+                        break;
+                    };
+
+                    last_activity = Instant::now();
                     match event {
+                        gemini::GeminiEvent::SetupComplete => {
+                            backoff_secs = 2;
+                            let _ = event_tx.send(AppEvent::BannerError(None));
+                        }
+
                         gemini::GeminiEvent::Audio(data) => {
                             let samples: Vec<i16> = data
-                                .chunks_exact(2)
-                                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
+                                .map(|&c| i16::from_le_bytes(c))
                                 .collect();
                             let level = dsp::pcm_level(&samples);
-                            echo_guard.note_output(&samples, RECV_SAMPLE_RATE, level);
+                            echo_guard.note_output(level);
 
                             let visemes = dsp::pcm_visemes(&samples, RECV_SAMPLE_RATE);
                             if !visemes.is_empty() {
                                 let _ = event_tx.send(AppEvent::Visemes(visemes, 0.02, 0.0));
                             }
 
+                            shared.lock().await.is_speaking = true;
                             let _ = event_tx.send(AppEvent::StateChange(AppState::Speaking));
-                            let _ = playback_tx.send(data).await;
+                            let _ = playback_tx.send(PlaybackCmd::Audio(data)).await;
                         }
 
                         gemini::GeminiEvent::OutputTranscript(text) => {
                             let _ = event_tx.send(AppEvent::Log(format!("Boogie: {text}")));
-                            let mut s = shared.lock().await;
-                            s.session_log.push(format!("assistant: {text}"));
+                            shared.lock().await.session_log.push(format!("assistant: {text}"));
                         }
 
                         gemini::GeminiEvent::InputTranscript(text) => {
+                            saw_untrusted_in_turn = false;
                             let _ = event_tx.send(AppEvent::Log(format!("User: {text}")));
-                            let mut s = shared.lock().await;
-                            s.session_log.push(format!("user: {text}"));
+                            shared.lock().await.session_log.push(format!("user: {text}"));
+                        }
+
+                        gemini::GeminiEvent::Interrupted => {
+                            tracing::info!("server interrupted playback — clearing speaker buffer");
+                            let _ = playback_tx.send(PlaybackCmd::Clear).await;
+                            echo_guard.reset();
+                            shared.lock().await.is_speaking = false;
+                            let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
                         }
 
                         gemini::GeminiEvent::TurnComplete => {
+                            saw_untrusted_in_turn = false;
+                            shared.lock().await.is_speaking = false;
                             let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
-                            echo_guard.reset();
-                            {
-                                let mut s = shared.lock().await;
-                                s.is_speaking = false;
-                            }
                         }
 
                         gemini::GeminiEvent::ToolCall(calls) => {
                             let _ = event_tx.send(AppEvent::StateChange(AppState::Thinking));
-                            let mut responses = Vec::new();
-                            for call in &calls {
-                                let _ = event_tx.send(AppEvent::Log(
-                                    format!("tool: {} {:?}", call.name, call.args),
-                                ));
-
-                                let result = if let Some((title, detail)) = needs_confirmation(&call.name, &call.args) {
-                                    let _ = event_tx.send(AppEvent::ConfirmRequest {
-                                        title: title.clone(),
-                                        detail: detail.clone(),
-                                    });
-                                    let _ = event_tx.send(AppEvent::Log(
-                                        format!("⚠ Waiting for confirmation: {title}"),
-                                    ));
-
-                                    match tokio::time::timeout(
-                                        std::time::Duration::from_secs(90),
-                                        confirm_rx.recv(),
-                                    ).await {
-                                        Ok(Some(ConfirmResponse::Confirmed)) => {
-                                            let _ = event_tx.send(AppEvent::Log("✓ Confirmed".to_string()));
-                                            tools.execute(&call.name, call.args.clone()).await
-                                        }
-                                        Ok(Some(ConfirmResponse::Denied)) => {
-                                            let _ = event_tx.send(AppEvent::Log("✗ Denied by user".to_string()));
-                                            tools::ToolResult::err("User denied this action.")
-                                        }
-                                        _ => {
-                                            let _ = event_tx.send(AppEvent::Log("⏱ Confirmation timed out".to_string()));
-                                            tools::ToolResult::err("Confirmation timed out (90s). Action cancelled.")
-                                        }
-                                    }
-                                } else {
-                                    tools.execute(&call.name, call.args.clone()).await
-                                };
-
-                                let output = if result.is_error {
-                                    serde_json::json!({"error": result.output})
-                                } else {
-                                    serde_json::json!({"result": result.output})
-                                };
-                                responses.push(gemini::FunctionResponse {
-                                    id: call.id.clone(),
-                                    name: call.name.clone(),
-                                    response: output,
-                                });
-                            }
-                            if let Err(e) = session.send_tool_response(&responses).await {
-                                tracing::error!("send tool response: {e}");
-                                break;
+                            if tool_job_tx.send((calls, saw_untrusted_in_turn)).await.is_err() {
+                                tracing::error!("tool worker channel closed");
                             }
                         }
 
                         gemini::GeminiEvent::SessionResumption { handle, resumable } => {
                             if resumable {
-                                let mut s = shared.lock().await;
-                                s.resume_handle = Some(handle);
+                                shared.lock().await.resume_handle = Some(handle);
                             }
                         }
 
+                        gemini::GeminiEvent::GoAway { time_left } => {
+                            tracing::info!("Gemini GoAway ({:?}) — refreshing session cleanly", time_left);
+                            let _ = event_tx.send(AppEvent::Log("refreshing session...".to_string()));
+                            break;
+                        }
+
+                        gemini::GeminiEvent::Closed(reason) => {
+                            tracing::warn!("Gemini WebSocket closed: {reason}");
+                            if used_resume && session_started.elapsed() < Duration::from_secs(10) {
+                                shared.lock().await.resume_handle = None;
+                            }
+                            let _ = event_tx.send(AppEvent::BannerError(Some(format!(
+                                "Connection closed: {reason}"
+                            ))));
+                            break;
+                        }
+
                         gemini::GeminiEvent::Error(e) => {
-                            tracing::error!("gemini: {e}");
+                            tracing::error!("gemini error: {e}");
+                            if used_resume && session_started.elapsed() < Duration::from_secs(15) {
+                                tracing::warn!("clearing potentially expired resume_handle after error");
+                                shared.lock().await.resume_handle = None;
+                            }
+                            let _ = event_tx.send(AppEvent::BannerError(Some(format!("Gemini: {e}"))));
                             let _ = event_tx.send(AppEvent::Log(format!("error: {e}")));
                             break;
                         }
                     }
                 }
 
-                Some(()) = interrupt_rx.recv() => {
-                    tracing::info!("user interrupt");
-                    while playback_tx.try_send(Vec::new()).is_ok() {}
+                Some(outcome) = tool_done_rx.recv() => {
+                    saw_untrusted_in_turn |= outcome.saw_untrusted;
+                    for jpeg in outcome.vision_frames {
+                        if let Err(e) = session.send_image(&jpeg).await {
+                            tracing::error!("send vision image failed: {e}");
+                        }
+                    }
+                    if let Err(e) = session.send_tool_response(&outcome.responses).await {
+                        tracing::error!("send tool response: {e}");
+                        break;
+                    }
+                    last_activity = Instant::now();
+                }
+
+                Some(()) = int_guard.recv() => {
+                    tracing::info!("user interrupt — clearing speaker buffer");
+                    let _ = playback_tx.send(PlaybackCmd::Clear).await;
+                    echo_guard.reset();
+                    shared.lock().await.is_speaking = false;
                     let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
                     let _ = event_tx.send(AppEvent::Log("interrupted".to_string()));
-                    echo_guard.reset();
-                    {
-                        let mut s = shared.lock().await;
-                        s.is_speaking = false;
+                }
+
+                Some(alerts) = monitor_rx.recv() => {
+                    for alert in alerts {
+                        tracing::info!("monitor alert: {}", truncate_chars(&alert, 80));
+                        let wrapped = crate::util::wrap_untrusted("web", &alert);
+                        if let Err(e) = session.send_text(&wrapped).await {
+                            tracing::error!("monitor alert send: {e}");
+                        }
+                        last_activity = Instant::now();
                     }
                 }
 
-                _ = tokio::time::sleep(std::time::Duration::from_secs_f64(STALL_LIMIT_SECS)) => {
+                Ok(app_ev) = internal_rx.recv() => {
+                    match app_ev {
+                        AppEvent::TimerAlert(msg) => {
+                            let prompt = format!("[TIMER_ALERT] The user's timer just finished: {msg}");
+                            if let Err(e) = session.send_text(&prompt).await {
+                                tracing::error!("timer alert send: {e}");
+                            }
+                            last_activity = Instant::now();
+                        }
+                        AppEvent::Shutdown => {
+                            should_shutdown = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+
+                _ = tick.tick() => {
                     if last_activity.elapsed().as_secs_f64() > STALL_LIMIT_SECS {
-                        tracing::warn!("stall detected, reconnecting");
+                        tracing::warn!("stall watchdog triggered after {STALL_LIMIT_SECS}s — reconnecting");
                         let _ = event_tx.send(AppEvent::Log("stall watchdog: reconnecting".to_string()));
                         break;
                     }
 
-                    let last_speech = {
-                        let s = shared.lock().await;
-                        s.last_user_speech
-                    };
-                    let monitor_alerts = actions::background_monitor::check_all_monitors().await;
-                    for alert in &monitor_alerts {
-                        tracing::info!("monitor alert: {}", &alert[..alert.len().min(80)]);
-                        if let Err(e) = session.send_text(alert).await {
-                            tracing::error!("monitor alert send: {e}");
-                        }
-                        last_activity = std::time::Instant::now();
+                    if session_started.elapsed().as_secs() >= MAX_SESSION_AGE_SECS {
+                        tracing::info!("session reached 14m — rotating connection cleanly");
+                        break;
                     }
 
+                    if last_monitor_check.elapsed().as_secs() >= MONITOR_CHECK_INTERVAL_SECS {
+                        last_monitor_check = Instant::now();
+                        let mtx = monitor_tx.clone();
+                        tokio::spawn(async move {
+                            let alerts = actions::background_monitor::check_all_monitors().await;
+                            if !alerts.is_empty() {
+                                let _ = mtx.send(alerts).await;
+                            }
+                        });
+                    }
+
+                    let last_speech = shared.lock().await.last_user_speech;
                     if proactive.should_trigger(last_speech) {
-                        let memory = config::load_memory();
-                        let recent = {
+                        let mem = config::load_memory();
+                        let recent: Vec<String> = {
                             let s = shared.lock().await;
-                            s.session_log.iter().rev().take(6).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>()
+                            s.session_log
+                                .iter()
+                                .rev()
+                                .take(6)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect()
                         };
-                        let prompt = proactive.build_prompt(&memory, &recent);
+                        let prompt = proactive.build_prompt(&mem, &recent);
                         proactive.mark_triggered();
                         tracing::info!("proactive check-in triggered");
                         if let Err(e) = session.send_text(&prompt).await {
                             tracing::error!("proactive send: {e}");
                         }
-                        last_activity = std::time::Instant::now();
+                        last_activity = Instant::now();
                     }
                 }
             }
         }
 
+        drop(mic_guard);
+        drop(int_guard);
+
+        // Save compact session summary with real detected language
         {
+            let mem = config::load_memory();
+            let lang = config::detect_language(&mem);
             let s = shared.lock().await;
             if !s.session_log.is_empty() {
                 let last_entries: Vec<&String> = s.session_log.iter().rev().take(20).collect();
-                let summary = last_entries.iter().rev().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
-                config::save_session_summary(&summary, "auto");
+                let summary = last_entries
+                    .iter()
+                    .rev()
+                    .map(|line| line.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                config::save_session_summary(&summary, &lang);
             }
         }
 
-        tracing::info!("session ended, reconnecting in 2s...");
-        let _ = event_tx.send(AppEvent::Log("reconnecting...".to_string()));
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if should_shutdown {
+            return;
+        }
+
+        tracing::info!("session ended, reconnecting in {}s...", backoff_secs);
+        let _ = event_tx.send(AppEvent::Log(format!("reconnecting in {backoff_secs}s...")));
+        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+        backoff_secs = (backoff_secs * 2).min(30);
+    }
+}
+
+async fn execute_tool_isolated(
+    tools: &Arc<tools::ToolRegistry>,
+    name: &str,
+    args: serde_json::Value,
+) -> tools::ToolResult {
+    let t = Arc::clone(tools);
+    let tool_name = name.to_string();
+    tokio::spawn(async move { t.execute(&tool_name, args).await })
+        .await
+        .unwrap_or_else(|e| tools::ToolResult::err(format!("tool panicked: {e}")))
+}
+
+async fn await_matching_confirm(
+    confirm_rx: &Arc<Mutex<mpsc::Receiver<ConfirmResponse>>>,
+    req_id: u64,
+) -> Option<bool> {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut rx = confirm_rx.lock().await;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(resp)) if resp.request_id == req_id => return Some(resp.confirmed),
+            Ok(Some(_stale)) => continue,
+            Ok(None) | Err(_) => return None,
+        }
     }
 }

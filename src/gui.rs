@@ -5,8 +5,9 @@ use eframe::egui::{
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
+use crate::config::ApiConfig;
 use crate::orb_shader::{OrbRenderer, OrbUniforms};
 use crate::{AppEvent, AppState, ConfirmResponse, SharedState};
 
@@ -26,6 +27,7 @@ const RESIZE_MARGIN: f32 = 6.0;
 const CAPTION_FADE_START: f64 = 10.0;
 const CAPTION_FADE_END: f64 = 18.0;
 const NUM_SPEC_BARS: usize = 14;
+const APP_LOGO_PNG: &[u8] = include_bytes!("../assets/logo_icon.png");
 
 #[derive(Clone, PartialEq)]
 enum LogKind {
@@ -44,8 +46,45 @@ struct ChatEntry {
 
 #[derive(Clone)]
 struct ConfirmDisplay {
+    request_id: u64,
     title: String,
     detail: String,
+}
+
+struct SetupForm {
+    api_key: String,
+    voice: String,
+    user_name: String,
+    input_device: String,
+    output_device: String,
+    push_to_talk: bool,
+    available_inputs: Vec<String>,
+    available_outputs: Vec<String>,
+    error_msg: Option<String>,
+}
+
+impl SetupForm {
+    fn new(initial_error: Option<String>) -> Self {
+        let available_inputs = crate::audio::list_input_devices()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        let available_outputs = crate::audio::list_output_devices()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        Self {
+            api_key: String::new(),
+            voice: "Aoede".to_string(),
+            user_name: String::new(),
+            input_device: String::new(),
+            output_device: String::new(),
+            push_to_talk: false,
+            available_inputs,
+            available_outputs,
+            error_msg: initial_error,
+        }
+    }
 }
 
 struct SysMetrics {
@@ -105,12 +144,19 @@ pub struct BoogieGui {
     shared: Arc<Mutex<SharedState>>,
     confirm_tx: mpsc::Sender<ConfirmResponse>,
     interrupt_tx: mpsc::Sender<()>,
+    config_tx: mpsc::Sender<ApiConfig>,
     muted: bool,
+    push_to_talk: bool,
+    ptt_holding: bool,
     confirm_pending: Option<ConfirmDisplay>,
+    banner_error: Option<String>,
+    setup_form: Option<SetupForm>,
+    shutdown_requested: bool,
     scroll_to_bottom: bool,
     metrics: SysMetrics,
 
     orb_renderer: Option<Arc<StdMutex<OrbRenderer>>>,
+    logo_texture: Option<egui::TextureHandle>,
     last_frame_time: f64,
     egui_time: f64,
 }
@@ -122,9 +168,13 @@ impl BoogieGui {
         shared: Arc<Mutex<SharedState>>,
         confirm_tx: mpsc::Sender<ConfirmResponse>,
         interrupt_tx: mpsc::Sender<()>,
+        config_tx: mpsc::Sender<ApiConfig>,
+        initial_cfg_err: Option<String>,
     ) -> Self {
         setup_fonts(&cc.egui_ctx);
         apply_obsidian_theme(&cc.egui_ctx);
+
+        let logo_texture = load_logo_texture(&cc.egui_ctx);
 
         let orb_renderer = cc.gl.as_ref().and_then(|gl| match OrbRenderer::new(gl) {
             Ok(r) => {
@@ -137,8 +187,15 @@ impl BoogieGui {
             }
         });
 
+        let ptt = shared.try_lock().map(|s| s.push_to_talk).unwrap_or(false);
+        let setup_form = initial_cfg_err.map(|e| SetupForm::new(Some(e)));
+
         Self {
-            state: AppState::Thinking,
+            state: if setup_form.is_some() {
+                AppState::Sleeping
+            } else {
+                AppState::Thinking
+            },
             raw_audio_level: 0.0,
             viseme_queue: VecDeque::new(),
             viseme_hop_secs: 0.02,
@@ -160,12 +217,19 @@ impl BoogieGui {
             shared,
             confirm_tx,
             interrupt_tx,
+            config_tx,
             muted: false,
+            push_to_talk: ptt,
+            ptt_holding: false,
             confirm_pending: None,
+            banner_error: None,
+            setup_form,
+            shutdown_requested: false,
             scroll_to_bottom: false,
             metrics: SysMetrics::new(),
 
             orb_renderer,
+            logo_texture,
             last_frame_time: 0.0,
             egui_time: 0.0,
         }
@@ -194,14 +258,30 @@ impl BoogieGui {
                         self.viseme_queue.push_back(frame);
                     }
                 }
-                AppEvent::ConfirmRequest { title, detail } => {
-                    self.confirm_pending = Some(ConfirmDisplay { title, detail });
+                AppEvent::ConfirmRequest {
+                    request_id,
+                    title,
+                    detail,
+                } => {
+                    self.confirm_pending = Some(ConfirmDisplay {
+                        request_id,
+                        title,
+                        detail,
+                    });
                     self.click_pulse = 0.85;
+                }
+                AppEvent::BannerError(err) => {
+                    self.banner_error = err;
+                }
+                AppEvent::TimerAlert(_) => {
+                    self.click_pulse = 1.0;
+                }
+                AppEvent::Shutdown => {
+                    self.shutdown_requested = true;
                 }
                 AppEvent::Log(msg) => {
                     self.push_log_message(msg);
                 }
-                _ => {}
             }
         }
     }
@@ -214,13 +294,14 @@ impl BoogieGui {
             if chunk.is_empty() {
                 return;
             }
-            if let Some(last) = self.entries.last_mut() {
-                if last.kind == LogKind::User && (now - last.updated_at) < 4.5 {
-                    append_transcript_chunk(&mut last.body, chunk);
-                    last.updated_at = now;
-                    self.scroll_to_bottom = true;
-                    return;
-                }
+            if let Some(last) = self.entries.last_mut()
+                && last.kind == LogKind::User
+                && (now - last.updated_at) < 4.5
+            {
+                append_transcript_chunk(&mut last.body, chunk);
+                last.updated_at = now;
+                self.scroll_to_bottom = true;
+                return;
             }
             self.entries.push(ChatEntry {
                 kind: LogKind::User,
@@ -233,13 +314,14 @@ impl BoogieGui {
             if chunk.is_empty() {
                 return;
             }
-            if let Some(last) = self.entries.last_mut() {
-                if last.kind == LogKind::Boogie && (now - last.updated_at) < 5.0 {
-                    append_transcript_chunk(&mut last.body, chunk);
-                    last.updated_at = now;
-                    self.scroll_to_bottom = true;
-                    return;
-                }
+            if let Some(last) = self.entries.last_mut()
+                && last.kind == LogKind::Boogie
+                && (now - last.updated_at) < 5.0
+            {
+                append_transcript_chunk(&mut last.body, chunk);
+                last.updated_at = now;
+                self.scroll_to_bottom = true;
+                return;
             }
             self.entries.push(ChatEntry {
                 kind: LogKind::Boogie,
@@ -319,11 +401,16 @@ impl BoogieGui {
             AppState::Thinking => [0.0, 0.0, 1.0, 0.0],
             AppState::Sleeping => [0.0, 0.0, 0.0, 1.0],
         };
-        for i in 0..4 {
-            self.state_weights[i] = exp_lerp(self.state_weights[i], target_w[i], 3.8, dt);
+        for (w, target) in self.state_weights.iter_mut().zip(target_w.iter()) {
+            *w = exp_lerp(*w, *target, 3.8, dt);
         }
 
-        self.smooth_muted = exp_lerp(self.smooth_muted, if self.muted { 1.0 } else { 0.0 }, 7.0, dt);
+        self.smooth_muted = exp_lerp(
+            self.smooth_muted,
+            if self.muted { 1.0 } else { 0.0 },
+            7.0,
+            dt,
+        );
         self.drawer_anim = exp_lerp(
             self.drawer_anim,
             if self.drawer_open { 1.0 } else { 0.0 },
@@ -501,20 +588,20 @@ impl BoogieGui {
                 Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), a),
             );
         }
-        painter.circle_filled(
-            center,
-            r,
-            Color32::from_rgba_unmultiplied(18, 14, 42, 235),
-        );
+        painter.circle_filled(center, r, Color32::from_rgba_unmultiplied(18, 14, 42, 235));
         painter.circle_stroke(
             center,
             r,
-            Stroke::new(2.0_f32, Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 180)),
+            Stroke::new(
+                2.0_f32,
+                Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 180),
+            ),
         );
     }
 
     fn draw_frameless_header(&mut self, ui: &mut egui::Ui, screen: Rect) {
-        let header_rect = Rect::from_min_size(screen.left_top(), Vec2::new(screen.width(), HEADER_H));
+        let header_rect =
+            Rect::from_min_size(screen.left_top(), Vec2::new(screen.width(), HEADER_H));
         let painter = ui.painter();
 
         // Ultra-subtle frosted header wash + bottom hairline
@@ -530,10 +617,17 @@ impl BoogieGui {
 
         let controls_w = 108.0;
         let drag_rect = Rect::from_min_max(
-            Pos2::new(header_rect.left() + RESIZE_MARGIN, header_rect.top() + RESIZE_MARGIN),
+            Pos2::new(
+                header_rect.left() + RESIZE_MARGIN,
+                header_rect.top() + RESIZE_MARGIN,
+            ),
             Pos2::new(header_rect.right() - controls_w, header_rect.bottom()),
         );
-        let drag_resp = ui.interact(drag_rect, ui.id().with("titlebar_drag"), Sense::click_and_drag());
+        let drag_resp = ui.interact(
+            drag_rect,
+            ui.id().with("titlebar_drag"),
+            Sense::click_and_drag(),
+        );
         if drag_resp.drag_started_by(egui::PointerButton::Primary) {
             ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
         }
@@ -545,31 +639,47 @@ impl BoogieGui {
 
         // Left: Brand mark + BOOGIE + Status Pill
         let state_col = self.state_color();
-        let pulse_alpha =
-            (150.0 + 105.0 * (self.egui_time as f32 * 3.0).sin().abs()) as u8;
+        let pulse_alpha = (150.0 + 105.0 * (self.egui_time as f32 * 3.0).sin().abs()) as u8;
 
-        let brand_x = header_rect.left() + 16.0;
+        let brand_x = header_rect.left() + 14.0;
         let cy = header_rect.center().y;
 
-        // Mini glowing brand dot/ring
-        painter.circle_filled(
-            Pos2::new(brand_x + 5.0, cy),
-            7.5,
-            Color32::from_rgba_unmultiplied(VIOLET.r(), VIOLET.g(), VIOLET.b(), 40),
-        );
-        painter.circle_stroke(
-            Pos2::new(brand_x + 5.0, cy),
-            5.0,
-            Stroke::new(1.3_f32, Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 210)),
-        );
-        painter.circle_filled(
-            Pos2::new(brand_x + 5.0, cy),
-            2.2,
-            Color32::from_rgba_unmultiplied(230, 245, 255, 235),
-        );
+        // Neon Boogie B logo icon in header
+        let logo_rect = Rect::from_center_size(Pos2::new(brand_x + 10.0, cy), Vec2::splat(22.0));
+        if let Some(tex) = &self.logo_texture {
+            painter.image(
+                tex.id(),
+                logo_rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            painter.rect_stroke(
+                logo_rect,
+                CornerRadius::same(5),
+                Stroke::new(
+                    0.8_f32,
+                    Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 80),
+                ),
+                egui::StrokeKind::Inside,
+            );
+        } else {
+            painter.circle_filled(
+                logo_rect.center(),
+                7.5,
+                Color32::from_rgba_unmultiplied(VIOLET.r(), VIOLET.g(), VIOLET.b(), 40),
+            );
+            painter.circle_stroke(
+                logo_rect.center(),
+                5.0,
+                Stroke::new(
+                    1.3_f32,
+                    Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 210),
+                ),
+            );
+        }
 
         painter.text(
-            Pos2::new(brand_x + 18.0, cy),
+            Pos2::new(brand_x + 28.0, cy),
             Align2::LEFT_CENTER,
             "BOOGIE",
             FontId::new(12.0, FontFamily::Proportional),
@@ -577,7 +687,7 @@ impl BoogieGui {
         );
 
         // Status pill
-        let pill_x = brand_x + 76.0;
+        let pill_x = brand_x + 88.0;
         let label = self.state_label();
         let pill_w = 18.0 + label.len() as f32 * 6.4 + 12.0;
         let pill_rect = Rect::from_center_size(
@@ -608,7 +718,12 @@ impl BoogieGui {
         painter.circle_filled(
             dot_pos,
             2.6,
-            Color32::from_rgba_unmultiplied(state_col.r(), state_col.g(), state_col.b(), pulse_alpha),
+            Color32::from_rgba_unmultiplied(
+                state_col.r(),
+                state_col.g(),
+                state_col.b(),
+                pulse_alpha,
+            ),
         );
         painter.text(
             Pos2::new(pill_rect.left() + 18.5, cy),
@@ -629,7 +744,12 @@ impl BoogieGui {
                 Align2::RIGHT_CENTER,
                 telemetry,
                 FontId::new(10.0, FontFamily::Monospace),
-                Color32::from_rgba_unmultiplied(TEXT_MUTED.r(), TEXT_MUTED.g(), TEXT_MUTED.b(), 180),
+                Color32::from_rgba_unmultiplied(
+                    TEXT_MUTED.r(),
+                    TEXT_MUTED.g(),
+                    TEXT_MUTED.b(),
+                    180,
+                ),
             );
         }
 
@@ -771,10 +891,8 @@ impl BoogieGui {
                         )
                     });
                     let h = galley.rect.height();
-                    let text_pos = Pos2::new(
-                        screen.center().x - galley.rect.width() * 0.5,
-                        cursor_y - h,
-                    );
+                    let text_pos =
+                        Pos2::new(screen.center().x - galley.rect.width() * 0.5, cursor_y - h);
                     // Subtle shadow pill behind bright captions for effortless legibility
                     let bg_rect = Rect::from_min_size(text_pos, galley.rect.size())
                         .expand2(Vec2::new(12.0, 4.0));
@@ -849,13 +967,19 @@ impl BoogieGui {
         }
 
         // Drawer mini header
-        let bar_rect = Rect::from_min_size(drawer_rect.left_top(), Vec2::new(drawer_rect.width(), 32.0));
+        let bar_rect =
+            Rect::from_min_size(drawer_rect.left_top(), Vec2::new(drawer_rect.width(), 32.0));
         painter.text(
             Pos2::new(bar_rect.left() + 16.0, bar_rect.center().y),
             Align2::LEFT_CENTER,
             "CONVERSATION",
             FontId::new(10.0, FontFamily::Monospace),
-            Color32::from_rgba_unmultiplied(TEXT_MUTED.r(), TEXT_MUTED.g(), TEXT_MUTED.b(), (a * 220.0) as u8),
+            Color32::from_rgba_unmultiplied(
+                TEXT_MUTED.r(),
+                TEXT_MUTED.g(),
+                TEXT_MUTED.b(),
+                (a * 220.0) as u8,
+            ),
         );
 
         let close_pill = Rect::from_center_size(
@@ -871,9 +995,19 @@ impl BoogieGui {
             );
         }
         let cx = close_pill.center();
-        let xcol = if close_resp.hovered() { TEXT_BRIGHT } else { TEXT_MUTED };
-        painter.line_segment([cx + Vec2::new(-3.5, -1.5), cx + Vec2::new(0.0, 2.0)], Stroke::new(1.4_f32, xcol));
-        painter.line_segment([cx + Vec2::new(0.0, 2.0), cx + Vec2::new(3.5, -1.5)], Stroke::new(1.4_f32, xcol));
+        let xcol = if close_resp.hovered() {
+            TEXT_BRIGHT
+        } else {
+            TEXT_MUTED
+        };
+        painter.line_segment(
+            [cx + Vec2::new(-3.5, -1.5), cx + Vec2::new(0.0, 2.0)],
+            Stroke::new(1.4_f32, xcol),
+        );
+        painter.line_segment(
+            [cx + Vec2::new(0.0, 2.0), cx + Vec2::new(3.5, -1.5)],
+            Stroke::new(1.4_f32, xcol),
+        );
         if close_resp.clicked() {
             self.drawer_open = false;
         }
@@ -932,9 +1066,7 @@ impl BoogieGui {
                                 .show(ui, |ui| {
                                     ui.set_max_width(max_bubble_w);
                                     ui.label(
-                                        RichText::new(&entry.body)
-                                            .size(13.0)
-                                            .color(TEXT_BRIGHT),
+                                        RichText::new(&entry.body).size(13.0).color(TEXT_BRIGHT),
                                     );
                                 });
                         });
@@ -957,9 +1089,7 @@ impl BoogieGui {
                                 .show(ui, |ui| {
                                     ui.set_max_width(max_bubble_w);
                                     ui.label(
-                                        RichText::new(&entry.body)
-                                            .size(13.0)
-                                            .color(TEXT_BRIGHT),
+                                        RichText::new(&entry.body).size(13.0).color(TEXT_BRIGHT),
                                     );
                                 });
                         });
@@ -1051,7 +1181,11 @@ impl BoogieGui {
         let mic_rect = Rect::from_center_size(mic_center, Vec2::splat(38.0));
         let mic_resp = ui
             .interact(mic_rect, ui.id().with("dock_mic"), Sense::click())
-            .on_hover_text(if self.muted { "Unmute microphone" } else { "Mute microphone" });
+            .on_hover_text(if self.muted {
+                "Unmute microphone"
+            } else {
+                "Mute microphone"
+            });
 
         let mic_col = if self.muted { CRIMSON } else { CYAN };
         let mic_fill_a = if mic_resp.hovered() { 58 } else { 32 };
@@ -1144,7 +1278,11 @@ impl BoogieGui {
                     stop_col.r(),
                     stop_col.g(),
                     stop_col.b(),
-                    if is_speaking || stop_resp.hovered() { 115 } else { 36 },
+                    if is_speaking || stop_resp.hovered() {
+                        115
+                    } else {
+                        36
+                    },
                 ),
             ),
         );
@@ -1273,11 +1411,7 @@ impl BoogieGui {
                 );
                 if !pending.detail.is_empty() {
                     ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(&pending.detail)
-                            .size(12.0)
-                            .color(TEXT_SOFT),
-                    );
+                    ui.label(RichText::new(&pending.detail).size(12.0).color(TEXT_SOFT));
                 }
 
                 ui.add_space(18.0);
@@ -1296,28 +1430,41 @@ impl BoogieGui {
                         )
                         .clicked()
                     {
-                        response = Some(ConfirmResponse::Confirmed);
+                        response = Some(ConfirmResponse {
+                            request_id: pending.request_id,
+                            confirmed: true,
+                        });
                     }
                     ui.add_space(10.0);
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("Deny")
-                                    .size(12.5)
-                                    .color(CRIMSON)
-                                    .strong(),
+                                RichText::new("Deny").size(12.5).color(CRIMSON).strong(),
                             )
-                            .fill(Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 26))
+                            .fill(Color32::from_rgba_unmultiplied(
+                                CRIMSON.r(),
+                                CRIMSON.g(),
+                                CRIMSON.b(),
+                                26,
+                            ))
                             .stroke(Stroke::new(
                                 1.0_f32,
-                                Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 95),
+                                Color32::from_rgba_unmultiplied(
+                                    CRIMSON.r(),
+                                    CRIMSON.g(),
+                                    CRIMSON.b(),
+                                    95,
+                                ),
                             ))
                             .corner_radius(CornerRadius::same(14))
                             .min_size(Vec2::new(96.0, 34.0)),
                         )
                         .clicked()
                     {
-                        response = Some(ConfirmResponse::Denied);
+                        response = Some(ConfirmResponse {
+                            request_id: pending.request_id,
+                            confirmed: false,
+                        });
                     }
                 });
             });
@@ -1325,6 +1472,248 @@ impl BoogieGui {
         if let Some(resp) = response {
             let _ = self.confirm_tx.try_send(resp);
             self.confirm_pending = None;
+        }
+    }
+
+    fn draw_error_banner(&mut self, ui: &mut egui::Ui, screen: Rect) {
+        let Some(msg) = self.banner_error.clone() else {
+            return;
+        };
+        let max_w = (screen.width() - 36.0).clamp(240.0, 560.0);
+        let banner_rect = Rect::from_center_size(
+            Pos2::new(screen.center().x, screen.top() + HEADER_H + 24.0),
+            Vec2::new(max_w, 32.0),
+        );
+        let painter = ui.painter();
+        painter.rect_filled(
+            banner_rect,
+            CornerRadius::same(12),
+            Color32::from_rgba_unmultiplied(46, 12, 24, 224),
+        );
+        painter.rect_stroke(
+            banner_rect,
+            CornerRadius::same(12),
+            Stroke::new(
+                1.0_f32,
+                Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 145),
+            ),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            Pos2::new(banner_rect.left() + 14.0, banner_rect.center().y),
+            Align2::LEFT_CENTER,
+            truncate_str(&msg, 72),
+            FontId::new(11.5, FontFamily::Proportional),
+            Color32::from_rgb(255, 185, 200),
+        );
+
+        let close_rect = Rect::from_center_size(
+            Pos2::new(banner_rect.right() - 16.0, banner_rect.center().y),
+            Vec2::splat(20.0),
+        );
+        let resp = ui.interact(close_rect, ui.id().with("banner_dismiss"), Sense::click());
+        let c = close_rect.center();
+        let xcol = if resp.hovered() {
+            TEXT_BRIGHT
+        } else {
+            TEXT_SOFT
+        };
+        painter.line_segment(
+            [c + Vec2::new(-3.5, -3.5), c + Vec2::new(3.5, 3.5)],
+            Stroke::new(1.3_f32, xcol),
+        );
+        painter.line_segment(
+            [c + Vec2::new(3.5, -3.5), c + Vec2::new(-3.5, 3.5)],
+            Stroke::new(1.3_f32, xcol),
+        );
+        if resp.clicked() {
+            self.banner_error = None;
+        }
+    }
+
+    fn draw_setup_dialog(&mut self, ctx: &egui::Context) {
+        let Some(form) = self.setup_form.as_mut() else {
+            return;
+        };
+
+        let mut submitted_cfg: Option<ApiConfig> = None;
+
+        egui::Window::new("boogie_setup")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .order(Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(13, 12, 28, 246))
+                    .stroke(Stroke::new(
+                        1.0_f32,
+                        Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 95),
+                    ))
+                    .corner_radius(CornerRadius::same(18))
+                    .inner_margin(egui::Margin::same(22)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.set_max_width(400.0);
+
+                ui.label(
+                    RichText::new("BOOGIE SETUP")
+                        .size(10.5)
+                        .color(CYAN)
+                        .family(FontFamily::Monospace),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Connect Gemini Live API")
+                        .size(16.0)
+                        .color(TEXT_BRIGHT)
+                        .strong(),
+                );
+                if let Some(err) = &form.error_msg {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(err).size(11.0).color(AMBER));
+                }
+
+                ui.add_space(12.0);
+                ui.label(RichText::new("Gemini API Key").size(12.0).color(TEXT_SOFT));
+                ui.add(
+                    egui::TextEdit::singleline(&mut form.api_key)
+                        .password(true)
+                        .hint_text("AIza...")
+                        .desired_width(f32::INFINITY),
+                );
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Voice:").size(12.0).color(TEXT_SOFT));
+                    egui::ComboBox::from_id_salt("setup_voice")
+                        .selected_text(&form.voice)
+                        .show_ui(ui, |ui| {
+                            for v in ["Aoede", "Charon", "Kore", "Fenrir", "Puck"] {
+                                ui.selectable_value(&mut form.voice, v.to_string(), v);
+                            }
+                        });
+                });
+
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Your Name (optional)")
+                        .size(12.0)
+                        .color(TEXT_SOFT),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut form.user_name)
+                        .hint_text("Leave blank for default")
+                        .desired_width(f32::INFINITY),
+                );
+
+                if !form.available_inputs.is_empty() {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Mic:").size(12.0).color(TEXT_SOFT));
+                        let sel = if form.input_device.is_empty() {
+                            "System Default"
+                        } else {
+                            form.input_device.as_str()
+                        };
+                        egui::ComboBox::from_id_salt("setup_mic")
+                            .selected_text(truncate_str(sel, 28))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut form.input_device,
+                                    String::new(),
+                                    "System Default",
+                                );
+                                for dev in &form.available_inputs {
+                                    ui.selectable_value(&mut form.input_device, dev.clone(), dev);
+                                }
+                            });
+                    });
+                }
+
+                if !form.available_outputs.is_empty() {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Speaker:").size(12.0).color(TEXT_SOFT));
+                        let sel = if form.output_device.is_empty() {
+                            "System Default"
+                        } else {
+                            form.output_device.as_str()
+                        };
+                        egui::ComboBox::from_id_salt("setup_spk")
+                            .selected_text(truncate_str(sel, 28))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut form.output_device,
+                                    String::new(),
+                                    "System Default",
+                                );
+                                for dev in &form.available_outputs {
+                                    ui.selectable_value(&mut form.output_device, dev.clone(), dev);
+                                }
+                            });
+                    });
+                }
+
+                ui.add_space(8.0);
+                ui.checkbox(&mut form.push_to_talk, "Push-to-Talk (hold Space)");
+
+                ui.add_space(14.0);
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("Save & Connect")
+                                .size(13.0)
+                                .color(BG_OBSIDIAN)
+                                .strong(),
+                        )
+                        .fill(CYAN)
+                        .corner_radius(CornerRadius::same(14))
+                        .min_size(Vec2::new(140.0, 36.0)),
+                    )
+                    .clicked()
+                {
+                    let key = form.api_key.trim().to_string();
+                    if key.is_empty() {
+                        form.error_msg = Some("Please enter your Gemini API key.".to_string());
+                    } else {
+                        let cfg = ApiConfig {
+                            gemini_api_key: key,
+                            voice: Some(form.voice.clone()),
+                            user_name: if form.user_name.trim().is_empty() {
+                                None
+                            } else {
+                                Some(form.user_name.trim().to_string())
+                            },
+                            input_device: if form.input_device.is_empty() {
+                                None
+                            } else {
+                                Some(form.input_device.clone())
+                            },
+                            output_device: if form.output_device.is_empty() {
+                                None
+                            } else {
+                                Some(form.output_device.clone())
+                            },
+                            push_to_talk: Some(form.push_to_talk),
+                            proactive_audio: Some(true),
+                            dashboard_enabled: Some(false),
+                            ..Default::default()
+                        };
+                        match cfg.save() {
+                            Ok(_) => submitted_cfg = Some(cfg),
+                            Err(e) => form.error_msg = Some(format!("Save failed: {e}")),
+                        }
+                    }
+                }
+            });
+
+        if let Some(cfg) = submitted_cfg {
+            self.push_to_talk = cfg.push_to_talk();
+            self.setup_form = None;
+            let _ = self.config_tx.try_send(cfg);
         }
     }
 }
@@ -1341,6 +1730,22 @@ impl eframe::App for BoogieGui {
         self.egui_time = now;
 
         self.process_events();
+        if self.shutdown_requested {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
+
+        // Push-to-talk Space key tracking (disabled while typing in setup inputs)
+        if self.push_to_talk && self.setup_form.is_none() && !ctx.wants_keyboard_input() {
+            let holding = ctx.input(|i| i.key_down(egui::Key::Space));
+            if holding != self.ptt_holding {
+                self.ptt_holding = holding;
+                if let Ok(mut s) = self.shared.try_lock() {
+                    s.ptt_active = holding;
+                }
+            }
+        }
+
         self.metrics.refresh();
         self.update_animations(ctx, dt);
 
@@ -1365,13 +1770,15 @@ impl eframe::App for BoogieGui {
                 self.draw_live_captions(ui, full_rect, dock_top);
                 self.draw_transcript_drawer(ui, full_rect, dock_top);
 
-                // 4. Frameless Custom Header Bar (top)
+                // 4. Frameless Custom Header Bar (top) + Error Banner
                 self.draw_frameless_header(ui, full_rect);
+                self.draw_error_banner(ui, full_rect);
 
                 // 5. Interactive poke/ripple on the 3D orb region (safely bounded between header & lower panels)
-                let orb_hit_y = full_rect.top()
-                    + (1.0 - (0.58 + self.drawer_anim * 0.16)) * full_rect.height();
-                let orb_hit_r = (full_rect.width().min(full_rect.height()) * (0.20 - self.drawer_anim * 0.05))
+                let orb_hit_y =
+                    full_rect.top() + (1.0 - (0.58 + self.drawer_anim * 0.16)) * full_rect.height();
+                let orb_hit_r = (full_rect.width().min(full_rect.height())
+                    * (0.20 - self.drawer_anim * 0.05))
                     .max(40.0);
                 let lower_limit = if self.drawer_open {
                     dock_top - (full_rect.height() * 0.44).clamp(180.0, 380.0) - 18.0
@@ -1384,10 +1791,14 @@ impl eframe::App for BoogieGui {
                 )
                 .intersect(Rect::from_min_max(
                     Pos2::new(full_rect.left(), full_rect.top() + HEADER_H + 4.0),
-                    Pos2::new(full_rect.right(), lower_limit.max(full_rect.top() + HEADER_H + 40.0)),
+                    Pos2::new(
+                        full_rect.right(),
+                        lower_limit.max(full_rect.top() + HEADER_H + 40.0),
+                    ),
                 ));
                 if orb_hit_rect.is_positive() {
-                    let orb_resp = ui.interact(orb_hit_rect, ui.id().with("orb_poke"), Sense::click());
+                    let orb_resp =
+                        ui.interact(orb_hit_rect, ui.id().with("orb_poke"), Sense::click());
                     if orb_resp.clicked() {
                         self.click_pulse = 1.0;
                     }
@@ -1402,15 +1813,16 @@ impl eframe::App for BoogieGui {
                 );
             });
 
-        // 6. Modal Confirmation Card (if pending)
+        // 7. Modals (Onboarding setup or Confirmation card)
+        self.draw_setup_dialog(ctx);
         self.draw_confirm_dialog(ctx);
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
-        if let (Some(gl), Some(renderer_arc)) = (gl, &self.orb_renderer) {
-            if let Ok(r) = renderer_arc.lock() {
-                r.destroy(gl);
-            }
+        if let (Some(gl), Some(renderer_arc)) = (gl, &self.orb_renderer)
+            && let Ok(r) = renderer_arc.lock()
+        {
+            r.destroy(gl);
         }
     }
 }
@@ -1429,14 +1841,20 @@ fn draw_win_button(ui: &mut egui::Ui, rect: Rect, id: &str, kind: WinBtnKind) ->
 
     if resp.hovered() {
         let hover_bg = match kind {
-            WinBtnKind::Close => Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 190),
+            WinBtnKind::Close => {
+                Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 190)
+            }
             _ => Color32::from_rgba_unmultiplied(255, 255, 255, 22),
         };
         painter.rect_filled(rect, CornerRadius::same(7), hover_bg);
     }
 
     let c = rect.center();
-    let fg = if resp.hovered() { TEXT_BRIGHT } else { TEXT_SOFT };
+    let fg = if resp.hovered() {
+        TEXT_BRIGHT
+    } else {
+        TEXT_SOFT
+    };
     let stroke = Stroke::new(1.3_f32, fg);
 
     match kind {
@@ -1447,9 +1865,19 @@ fn draw_win_button(ui: &mut egui::Ui, rect: Rect, id: &str, kind: WinBtnKind) ->
             if is_max {
                 let back = Rect::from_center_size(c + Vec2::new(1.5, -1.5), Vec2::splat(7.5));
                 let front = Rect::from_center_size(c + Vec2::new(-1.5, 1.5), Vec2::splat(7.5));
-                painter.rect_stroke(back, CornerRadius::same(1), stroke, egui::StrokeKind::Inside);
+                painter.rect_stroke(
+                    back,
+                    CornerRadius::same(1),
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
                 painter.rect_filled(front, CornerRadius::same(1), BG_OBSIDIAN);
-                painter.rect_stroke(front, CornerRadius::same(1), stroke, egui::StrokeKind::Inside);
+                painter.rect_stroke(
+                    front,
+                    CornerRadius::same(1),
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
             } else {
                 let sq = Rect::from_center_size(c, Vec2::splat(8.5));
                 painter.rect_stroke(sq, CornerRadius::same(1), stroke, egui::StrokeKind::Inside);
@@ -1479,7 +1907,10 @@ fn draw_mic_icon(painter: &egui::Painter, c: Pos2, col: Color32, muted: bool) {
     // Stem + base
     painter.line_segment([Pos2::new(c.x, c.y + 4.5), Pos2::new(c.x, c.y + 8.0)], s);
     painter.line_segment(
-        [Pos2::new(c.x - 3.8, c.y + 8.0), Pos2::new(c.x + 3.8, c.y + 8.0)],
+        [
+            Pos2::new(c.x - 3.8, c.y + 8.0),
+            Pos2::new(c.x + 3.8, c.y + 8.0),
+        ],
         s,
     );
     if muted {
@@ -1549,19 +1980,34 @@ fn format_tool_log(raw: &str) -> (String, String) {
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Extract clean values from serde_json Debug output `String("...")`
+    // Extract clean values from JSON `{"k":"v"}` or serde_json Debug output `String("...")`
     let mut values = Vec::new();
-    let mut rest = args_part;
-    while let Some(idx) = rest.find("String(\"") {
-        let after = &rest[idx + 8..];
-        if let Some(end) = after.find("\")") {
-            let val = after[..end].replace('_', " ");
-            if !val.is_empty() {
-                values.push(val);
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(args_part)
+    {
+        for (_, v) in map {
+            let s = match v {
+                serde_json::Value::String(st) => st.replace('_', " "),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => continue,
+            };
+            if !s.is_empty() {
+                values.push(s);
             }
-            rest = &after[end + 2..];
-        } else {
-            break;
+        }
+    } else {
+        let mut rest = args_part;
+        while let Some(idx) = rest.find("String(\"") {
+            let after = &rest[idx + 8..];
+            if let Some(end) = after.find("\")") {
+                let val = after[..end].replace('_', " ");
+                if !val.is_empty() {
+                    values.push(val);
+                }
+                rest = &after[end + 2..];
+            } else {
+                break;
+            }
         }
     }
 
@@ -1596,11 +2042,7 @@ fn truncate_tail(s: &str, max_chars: usize) -> String {
         s.to_string()
     } else {
         let skip = count.saturating_sub(max_chars.saturating_sub(1));
-        let start = s
-            .char_indices()
-            .nth(skip)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+        let start = s.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
         format!("…{}", s[start..].trim_start())
     }
 }
@@ -1662,18 +2104,44 @@ fn apply_obsidian_theme(ctx: &egui::Context) {
     ctx.set_visuals(v);
 }
 
+fn load_app_icon() -> Option<egui::IconData> {
+    let img = image::load_from_memory(APP_LOGO_PNG).ok()?.to_rgba8();
+    let (width, height) = img.dimensions();
+    Some(egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    })
+}
+
+fn load_logo_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let img = image::load_from_memory(APP_LOGO_PNG).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let color_image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &img);
+    Some(ctx.load_texture("boogie_app_logo", color_image, egui::TextureOptions::LINEAR))
+}
+
 pub fn run_gui(
     event_rx: broadcast::Receiver<AppEvent>,
     shared: Arc<Mutex<SharedState>>,
     confirm_tx: mpsc::Sender<ConfirmResponse>,
     interrupt_tx: mpsc::Sender<()>,
+    config_tx: mpsc::Sender<ApiConfig>,
+    initial_cfg_err: Option<String>,
 ) -> Result<(), eframe::Error> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1280.0_f32, 800.0_f32])
+        .with_min_inner_size([480.0_f32, 540.0_f32])
+        .with_maximized(true)
+        .with_decorations(false)
+        .with_title("Boogie");
+
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(Arc::new(icon));
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([520.0_f32, 740.0_f32])
-            .with_min_inner_size([380.0_f32, 520.0_f32])
-            .with_decorations(false)
-            .with_title("Boogie"),
+        viewport,
         multisampling: 4,
         ..Default::default()
     };
@@ -1688,6 +2156,8 @@ pub fn run_gui(
                 shared,
                 confirm_tx,
                 interrupt_tx,
+                config_tx,
+                initial_cfg_err,
             )))
         }),
     )

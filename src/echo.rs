@@ -1,10 +1,16 @@
-use std::collections::VecDeque;
+use std::time::Instant;
 
-const HISTORY_SECS: f64 = 1.0;
-const ECHO_RATIO: f32 = 1.4;
+const SPEECH_THRESHOLD: f32 = 0.025;
+const BARGE_IN_RATIO: f32 = 1.45;
+const SPEAKER_TAIL_SECS: f64 = 0.40;
+const SPEECH_HANGOVER_SECS: f64 = 0.40;
+const STREAM_END_SILENCE_SECS: f64 = 1.05;
 
 pub struct EchoGuard {
-    output_history: VecDeque<(f32, f64)>,
+    recent_output_level: f32,
+    last_speaker_active: Option<Instant>,
+    last_user_voice: Option<Instant>,
+    stream_active: bool,
     learned_ratio: f32,
     sample_count: u32,
 }
@@ -12,71 +18,139 @@ pub struct EchoGuard {
 impl EchoGuard {
     pub fn new() -> Self {
         Self {
-            output_history: VecDeque::new(),
-            learned_ratio: ECHO_RATIO,
+            recent_output_level: 0.0,
+            last_speaker_active: None,
+            last_user_voice: None,
+            stream_active: false,
+            learned_ratio: BARGE_IN_RATIO,
             sample_count: 0,
         }
     }
 
-    pub fn note_output(&mut self, _samples: &[i16], sample_rate: u32, level: f32) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
-        self.output_history.push_back((level, now));
-        let cutoff = now - HISTORY_SECS;
-        while self
-            .output_history
-            .front()
-            .is_some_and(|(_, t)| *t < cutoff)
-        {
-            self.output_history.pop_front();
-        }
-        let _ = sample_rate;
+    /// Record output audio level when speaker chunks arrive.
+    pub fn note_output(&mut self, level: f32) {
+        self.recent_output_level = self.recent_output_level.max(level);
+        self.last_speaker_active = Some(Instant::now());
     }
 
-    pub fn is_user_speech(&mut self, _samples: &[i16], _sample_rate: u32, mic_level: f32) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
-        let cutoff = now - HISTORY_SECS;
-        while self
-            .output_history
-            .front()
-            .is_some_and(|(_, t)| *t < cutoff)
-        {
-            self.output_history.pop_front();
+    /// Evaluates whether a mic frame should be transmitted to Gemini Live.
+    /// Uses real speaker buffer occupancy (`speaker_playing`) plus an acoustic room tail
+    /// hangover, and keeps mic open for 400ms after user speech ends so final syllables aren't clipped.
+    pub fn evaluate_mic(
+        &mut self,
+        mic_level: f32,
+        speaker_playing: bool,
+        now: Instant,
+    ) -> MicDecision {
+        if speaker_playing {
+            self.last_speaker_active = Some(now);
         }
 
-        let recent_output = self
-            .output_history
-            .iter()
-            .map(|(l, _)| *l)
-            .fold(0.0f32, f32::max);
+        let in_speaker_tail = speaker_playing
+            || self
+                .last_speaker_active
+                .is_some_and(|t| now.duration_since(t).as_secs_f64() < SPEAKER_TAIL_SECS);
 
-        if recent_output < 0.01 {
-            return mic_level > 0.02;
-        }
-
-        let ratio = mic_level / (recent_output + 1e-6);
-        if self.sample_count < 100 {
-            self.sample_count += 1;
-            if ratio > self.learned_ratio * 0.8 {
-                self.learned_ratio = self.learned_ratio * 0.95 + ratio * 0.05;
+        if !in_speaker_tail {
+            // Decay remembered speaker level smoothly once silent
+            self.recent_output_level *= 0.85;
+            if self.recent_output_level < 0.005 {
+                self.recent_output_level = 0.0;
             }
         }
 
-        ratio > self.learned_ratio
+        let voice_detected = if !in_speaker_tail || self.recent_output_level < 0.01 {
+            mic_level > SPEECH_THRESHOLD
+        } else {
+            let ratio = mic_level / (self.recent_output_level + 1e-6);
+            if self.sample_count < 100 && ratio > self.learned_ratio * 0.8 && ratio < 4.0 {
+                self.sample_count += 1;
+                self.learned_ratio = self.learned_ratio * 0.95 + ratio * 0.05;
+            }
+            mic_level > 0.06 && ratio > self.learned_ratio
+        };
+
+        if voice_detected {
+            self.last_user_voice = Some(now);
+            self.stream_active = true;
+            return MicDecision::SendAudio;
+        }
+
+        // Speech hangover: continue sending audio briefly after voice stops
+        if let Some(last_voice) = self.last_user_voice {
+            let silent_secs = now.duration_since(last_voice).as_secs_f64();
+            if silent_secs < SPEECH_HANGOVER_SECS {
+                return MicDecision::SendAudio;
+            }
+            if self.stream_active && silent_secs >= STREAM_END_SILENCE_SECS {
+                self.stream_active = false;
+                return MicDecision::SendStreamEnd;
+            }
+        }
+
+        MicDecision::Suppress
     }
 
     pub fn reset(&mut self) {
-        self.output_history.clear();
+        self.recent_output_level = 0.0;
+        self.last_speaker_active = None;
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicDecision {
+    SendAudio,
+    SendStreamEnd,
+    Suppress,
 }
 
 impl Default for EchoGuard {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn suppresses_echo_while_speaker_is_actively_playing() {
+        let mut eg = EchoGuard::new();
+        let t0 = Instant::now();
+        eg.note_output(0.4);
+        // Even 2 seconds after chunk arrival, if speaker buffer is still playing, suppress low echo
+        let t1 = t0 + Duration::from_secs(2);
+        assert_eq!(eg.evaluate_mic(0.25, true, t1), MicDecision::Suppress);
+        // Loud user barge-in passes through
+        assert_eq!(eg.evaluate_mic(0.85, true, t1), MicDecision::SendAudio);
+    }
+
+    #[test]
+    fn speech_hangover_and_stream_end_fire_in_order() {
+        let mut eg = EchoGuard::new();
+        let t0 = Instant::now();
+        assert_eq!(eg.evaluate_mic(0.2, false, t0), MicDecision::SendAudio);
+        // 200ms silence: hangover keeps audio flowing
+        assert_eq!(
+            eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(200)),
+            MicDecision::SendAudio
+        );
+        // 600ms silence: suppressed, not yet streamEnd
+        assert_eq!(
+            eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(600)),
+            MicDecision::Suppress
+        );
+        // 1100ms silence: emits SendStreamEnd once
+        assert_eq!(
+            eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(1100)),
+            MicDecision::SendStreamEnd
+        );
+        // Subsequent silence does not spam SendStreamEnd
+        assert_eq!(
+            eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(1400)),
+            MicDecision::Suppress
+        );
     }
 }
