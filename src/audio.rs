@@ -18,13 +18,6 @@ pub struct AudioInput {
 
 pub struct AudioOutput {
     _stream: Stream,
-    queued_samples: Arc<AtomicUsize>,
-}
-
-impl AudioOutput {
-    pub fn queued_samples_handle(&self) -> Arc<AtomicUsize> {
-        Arc::clone(&self.queued_samples)
-    }
 }
 
 pub fn list_input_devices() -> Vec<(String, Device)> {
@@ -84,8 +77,10 @@ pub fn open_mic(device: Option<&Device>, tx: mpsc::Sender<Vec<u8>>) -> Result<Au
         .default_input_config()
         .map_err(|e| format!("no default input config: {e}"))?;
 
+    let dev_name = dev.name().unwrap_or_else(|_| "unknown".to_string());
     tracing::info!(
-        "mic default config: {}ch {}Hz {:?}",
+        "mic opened '{}' ({}ch {}Hz {:?})",
+        dev_name,
         default_cfg.channels(),
         default_cfg.sample_rate().0,
         default_cfg.sample_format()
@@ -180,6 +175,7 @@ fn emit_mic_chunk(mono: &[i16], native_rate: u32, tx: &mpsc::Sender<Vec<u8>>) {
 pub fn open_speaker(
     device: Option<&Device>,
     mut rx: mpsc::Receiver<PlaybackCmd>,
+    queued_samples: Arc<AtomicUsize>,
 ) -> Result<AudioOutput, String> {
     let host = cpal::default_host();
     let dev = match device {
@@ -193,8 +189,10 @@ pub fn open_speaker(
         .default_output_config()
         .map_err(|e| format!("no default output config: {e}"))?;
 
+    let dev_name = dev.name().unwrap_or_else(|_| "unknown".to_string());
     tracing::info!(
-        "speaker default config: {}ch {}Hz {:?}",
+        "speaker opened '{}' ({}ch {}Hz {:?})",
+        dev_name,
         default_cfg.channels(),
         default_cfg.sample_rate().0,
         default_cfg.sample_format()
@@ -216,7 +214,7 @@ pub fn open_speaker(
     let buffer = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(
         native_rate as usize * native_channels,
     )));
-    let queued_samples = Arc::new(AtomicUsize::new(0));
+    queued_samples.store(0, Ordering::Release);
 
     let buf_write = Arc::clone(&buffer);
     let queued_write = Arc::clone(&queued_samples);
@@ -330,10 +328,7 @@ pub fn open_speaker(
         .play()
         .map_err(|e| format!("failed to start speaker: {e}"))?;
 
-    Ok(AudioOutput {
-        _stream: stream,
-        queued_samples,
-    })
+    Ok(AudioOutput { _stream: stream })
 }
 
 /// Linear resampler with a simple anti-aliasing box-average pre-filter when downsampling.

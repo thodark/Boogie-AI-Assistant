@@ -5,6 +5,7 @@ const BARGE_IN_RATIO: f32 = 1.45;
 const SPEAKER_TAIL_SECS: f64 = 0.40;
 const SPEECH_HANGOVER_SECS: f64 = 0.45;
 const STREAM_END_SILENCE_SECS: f64 = 0.75;
+const PTT_RELEASE_TAIL_SECS: f64 = 0.12;
 
 pub struct EchoGuard {
     recent_output_level: f32,
@@ -91,6 +92,26 @@ impl EchoGuard {
         MicDecision::Suppress
     }
 
+    pub fn evaluate_ptt(&mut self, ptt_active: bool, now: Instant) -> MicDecision {
+        if ptt_active {
+            self.last_user_voice = Some(now);
+            self.stream_active = true;
+            return MicDecision::SendAudio;
+        }
+        if self.stream_active {
+            let elapsed = self
+                .last_user_voice
+                .map(|t| now.duration_since(t).as_secs_f64())
+                .unwrap_or(PTT_RELEASE_TAIL_SECS);
+            if elapsed < PTT_RELEASE_TAIL_SECS {
+                return MicDecision::SendAudio;
+            }
+            self.stream_active = false;
+            return MicDecision::SendStreamEnd;
+        }
+        MicDecision::Suppress
+    }
+
     pub fn reset(&mut self) {
         self.recent_output_level = 0.0;
         self.last_speaker_active = None;
@@ -150,6 +171,28 @@ mod tests {
         // Subsequent silence does not spam SendStreamEnd
         assert_eq!(
             eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(1100)),
+            MicDecision::Suppress
+        );
+    }
+
+    #[test]
+    fn ptt_sends_audio_while_held_and_stream_end_on_release() {
+        let mut eg = EchoGuard::new();
+        let t0 = Instant::now();
+        assert_eq!(eg.evaluate_ptt(false, t0), MicDecision::Suppress);
+        assert_eq!(eg.evaluate_ptt(true, t0), MicDecision::SendAudio);
+        // Short release tail preserves trailing syllable
+        assert_eq!(
+            eg.evaluate_ptt(false, t0 + Duration::from_millis(50)),
+            MicDecision::SendAudio
+        );
+        // After tail expires, emit SendStreamEnd once
+        assert_eq!(
+            eg.evaluate_ptt(false, t0 + Duration::from_millis(150)),
+            MicDecision::SendStreamEnd
+        );
+        assert_eq!(
+            eg.evaluate_ptt(false, t0 + Duration::from_millis(250)),
             MicDecision::Suppress
         );
     }

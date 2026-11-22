@@ -20,6 +20,10 @@ impl ProactiveEngine {
         }
     }
 
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
     pub fn should_trigger(&self, last_user_speech: Instant) -> bool {
         if !self.enabled {
             return false;

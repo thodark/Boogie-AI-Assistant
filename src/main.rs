@@ -12,8 +12,9 @@ mod proactive;
 mod tools;
 mod util;
 
-use std::sync::Arc;
+use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing_subscriber::EnvFilter;
@@ -30,6 +31,184 @@ const WS_PING_INTERVAL_SECS: u64 = 20;
 const TOOL_EXEC_TIMEOUT_SECS: u64 = 25;
 const MONITOR_CHECK_INTERVAL_SECS: u64 = 60;
 const MAX_SESSION_AGE_SECS: u64 = 14 * 60; // Proactive clean refresh before 15m audio limit
+const MAX_LOG_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+#[derive(Clone)]
+struct TeeMakeWriter {
+    file: Option<Arc<StdMutex<std::fs::File>>>,
+}
+
+struct TeeWriter {
+    stderr: std::io::Stderr,
+    file: Option<Arc<StdMutex<std::fs::File>>>,
+}
+
+impl Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = self.stderr.write_all(buf);
+        if let Some(f) = &self.file
+            && let Ok(mut guard) = f.lock()
+        {
+            let _ = guard.write_all(buf);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = self.stderr.flush();
+        if let Some(f) = &self.file
+            && let Ok(mut guard) = f.lock()
+        {
+            let _ = guard.flush();
+        }
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TeeMakeWriter {
+    type Writer = TeeWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TeeWriter {
+            stderr: std::io::stderr(),
+            file: self.file.clone(),
+        }
+    }
+}
+
+fn open_log_file() -> (std::path::PathBuf, Option<Arc<StdMutex<std::fs::File>>>) {
+    let log_path = config::active_config_dir().join("boogie.log");
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let oversize = std::fs::metadata(&log_path)
+        .map(|m| m.len() > MAX_LOG_FILE_BYTES)
+        .unwrap_or(false);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).write(true);
+    if oversize {
+        opts.truncate(true);
+    } else {
+        opts.append(true);
+    }
+    let file = opts
+        .open(&log_path)
+        .ok()
+        .map(|f| Arc::new(StdMutex::new(f)));
+    (log_path, file)
+}
+
+enum AudioCmd {
+    Reload {
+        input_device: Option<String>,
+        output_device: Option<String>,
+    },
+}
+
+type PlaybackSlot = Arc<StdMutex<Option<mpsc::Sender<PlaybackCmd>>>>;
+
+async fn send_playback(slot: &PlaybackSlot, cmd: PlaybackCmd) {
+    let tx = slot.lock().ok().and_then(|g| g.clone());
+    if let Some(tx) = tx {
+        let _ = tx.send(cmd).await;
+    }
+}
+
+fn open_audio_devices(
+    input_name: Option<&str>,
+    output_name: Option<&str>,
+    mic_tx: &mpsc::Sender<Vec<u8>>,
+    speaker_queued: &Arc<AtomicUsize>,
+    playback_slot: &PlaybackSlot,
+    event_tx: &broadcast::Sender<AppEvent>,
+) -> (Option<audio::AudioInput>, Option<audio::AudioOutput>) {
+    let mut errs = Vec::new();
+    let in_dev = audio::find_input_device(input_name);
+    let mic_stream = match audio::open_mic(in_dev.as_ref(), mic_tx.clone()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!("failed to open mic: {e}");
+            errs.push(format!("Mic error: {e}"));
+            None
+        }
+    };
+
+    let out_dev = audio::find_output_device(output_name);
+    let (playback_tx, playback_rx) = mpsc::channel::<PlaybackCmd>(200);
+    let speaker_output =
+        match audio::open_speaker(out_dev.as_ref(), playback_rx, Arc::clone(speaker_queued)) {
+            Ok(s) => {
+                if let Ok(mut slot) = playback_slot.lock() {
+                    *slot = Some(playback_tx);
+                }
+                Some(s)
+            }
+            Err(e) => {
+                tracing::error!("failed to open speaker: {e}");
+                errs.push(format!("Speaker error: {e}"));
+                None
+            }
+        };
+
+    if errs.is_empty() {
+        let _ = event_tx.send(AppEvent::BannerError(None));
+    } else {
+        let _ = event_tx.send(AppEvent::BannerError(Some(errs.join(" | "))));
+    }
+
+    (mic_stream, speaker_output)
+}
+
+fn spawn_audio_manager(
+    initial_input: Option<String>,
+    initial_output: Option<String>,
+    mic_tx: mpsc::Sender<Vec<u8>>,
+    speaker_queued: Arc<AtomicUsize>,
+    playback_slot: PlaybackSlot,
+    event_tx: broadcast::Sender<AppEvent>,
+) -> std::sync::mpsc::Sender<AudioCmd> {
+    let (audio_cmd_tx, audio_cmd_rx) = std::sync::mpsc::channel::<AudioCmd>();
+    std::thread::spawn(move || {
+        // Keep cpal::Stream (!Send on Windows) strictly confined to this dedicated OS thread.
+        let (mut mic_stream, mut speaker_output) = open_audio_devices(
+            initial_input.as_deref(),
+            initial_output.as_deref(),
+            &mic_tx,
+            &speaker_queued,
+            &playback_slot,
+            &event_tx,
+        );
+
+        while let Ok(cmd) = audio_cmd_rx.recv() {
+            match cmd {
+                AudioCmd::Reload {
+                    input_device,
+                    output_device,
+                } => {
+                    tracing::info!(
+                        "reloading audio devices (mic={:?}, speaker={:?})",
+                        input_device.as_deref().unwrap_or("System Default"),
+                        output_device.as_deref().unwrap_or("System Default"),
+                    );
+                    if let Ok(mut slot) = playback_slot.lock() {
+                        *slot = None;
+                    }
+                    drop(mic_stream.take());
+                    drop(speaker_output.take());
+                    (mic_stream, speaker_output) = open_audio_devices(
+                        input_device.as_deref(),
+                        output_device.as_deref(),
+                        &mic_tx,
+                        &speaker_queued,
+                        &playback_slot,
+                        &event_tx,
+                    );
+                }
+            }
+        }
+    });
+    audio_cmd_tx
+}
 
 #[derive(Clone, Debug)]
 pub enum AppEvent {
@@ -101,11 +280,17 @@ fn enable_dpi_awareness() {}
 fn main() {
     enable_dpi_awareness();
 
+    let (log_path, log_file) = open_log_file();
+    let make_writer = TeeMakeWriter { file: log_file };
     tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(make_writer)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("boogie=info")),
         )
         .init();
+
+    tracing::info!("Boogie starting (log: {})", log_path.display());
 
     let (initial_cfg, initial_cfg_err) = match config::ApiConfig::load() {
         Ok(c) => (Some(c), None),
@@ -122,46 +307,20 @@ fn main() {
 
     let (event_tx, _) = broadcast::channel::<AppEvent>(256);
     let (mic_tx, mic_rx) = mpsc::channel::<Vec<u8>>(200);
-    let (playback_tx, playback_rx) = mpsc::channel::<PlaybackCmd>(200);
     let (confirm_tx, confirm_rx) = mpsc::channel::<ConfirmResponse>(8);
     let (interrupt_tx, interrupt_rx) = mpsc::channel::<()>(8);
-    let (config_tx, config_rx) = mpsc::channel::<config::ApiConfig>(2);
+    let (config_tx, config_rx) = mpsc::channel::<config::ApiConfig>(8);
 
-    let in_dev = initial_cfg
-        .as_ref()
-        .and_then(|c| audio::find_input_device(c.input_device.as_deref()));
-    let out_dev = initial_cfg
-        .as_ref()
-        .and_then(|c| audio::find_output_device(c.output_device.as_deref()));
-
-    let _mic_stream = match audio::open_mic(in_dev.as_ref(), mic_tx) {
-        Ok(s) => {
-            tracing::info!("mic opened");
-            Some(s)
-        }
-        Err(e) => {
-            tracing::error!("failed to open mic: {e}");
-            let _ = event_tx.send(AppEvent::BannerError(Some(format!("Mic error: {e}"))));
-            None
-        }
-    };
-
-    let speaker_output = match audio::open_speaker(out_dev.as_ref(), playback_rx) {
-        Ok(s) => {
-            tracing::info!("speaker opened");
-            Some(s)
-        }
-        Err(e) => {
-            tracing::error!("failed to open speaker: {e}");
-            let _ = event_tx.send(AppEvent::BannerError(Some(format!("Speaker error: {e}"))));
-            None
-        }
-    };
-
-    let speaker_queued = speaker_output
-        .as_ref()
-        .map(audio::AudioOutput::queued_samples_handle)
-        .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)));
+    let speaker_queued = Arc::new(AtomicUsize::new(0));
+    let playback_slot: PlaybackSlot = Arc::new(StdMutex::new(None));
+    let audio_cmd_tx = spawn_audio_manager(
+        initial_cfg.as_ref().and_then(|c| c.input_device.clone()),
+        initial_cfg.as_ref().and_then(|c| c.output_device.clone()),
+        mic_tx,
+        Arc::clone(&speaker_queued),
+        Arc::clone(&playback_slot),
+        event_tx.clone(),
+    );
 
     let mut tool_registry = tools::ToolRegistry::new();
     actions::register_all(&mut tool_registry, event_tx.clone());
@@ -175,16 +334,18 @@ fn main() {
     let event_tx_sup = event_tx.clone();
     let shared_sup = shared.clone();
     let tools_sup = tool_registry.clone();
+    let cfg_sup = initial_cfg.clone();
 
     rt.spawn(async move {
         run_supervisor(
-            initial_cfg,
+            cfg_sup,
             config_rx,
+            audio_cmd_tx,
             tools_sup,
             event_tx_sup,
             shared_sup,
             mic_rx,
-            playback_tx,
+            playback_slot,
             speaker_queued,
             confirm_rx,
             interrupt_rx,
@@ -200,6 +361,7 @@ fn main() {
         confirm_tx,
         interrupt_tx,
         config_tx,
+        initial_cfg,
         initial_cfg_err,
     ) {
         tracing::error!("gui: {e}");
@@ -210,11 +372,12 @@ fn main() {
 async fn run_supervisor(
     initial_cfg: Option<config::ApiConfig>,
     mut config_rx: mpsc::Receiver<config::ApiConfig>,
+    audio_cmd_tx: std::sync::mpsc::Sender<AudioCmd>,
     tools: Arc<tools::ToolRegistry>,
     event_tx: broadcast::Sender<AppEvent>,
     shared: Arc<Mutex<SharedState>>,
     mic_rx: mpsc::Receiver<Vec<u8>>,
-    playback_tx: mpsc::Sender<PlaybackCmd>,
+    playback_slot: PlaybackSlot,
     speaker_queued: Arc<AtomicUsize>,
     confirm_rx: mpsc::Receiver<ConfirmResponse>,
     interrupt_rx: mpsc::Receiver<()>,
@@ -229,6 +392,10 @@ async fn run_supervisor(
                         let mut s = shared.lock().await;
                         s.push_to_talk = c.push_to_talk();
                     }
+                    let _ = audio_cmd_tx.send(AudioCmd::Reload {
+                        input_device: c.input_device.clone(),
+                        output_device: c.output_device.clone(),
+                    });
                     c
                 }
                 None => return,
@@ -250,29 +417,35 @@ async fn run_supervisor(
     }
 
     // Wrap channels in Arc<Mutex<...>> so the supervisor can recover cleanly if run_session ever panics
+    let active_cfg = Arc::new(Mutex::new(cfg));
+    let config_rx = Arc::new(Mutex::new(config_rx));
     let mic_rx = Arc::new(Mutex::new(mic_rx));
     let confirm_rx = Arc::new(Mutex::new(confirm_rx));
     let interrupt_rx = Arc::new(Mutex::new(interrupt_rx));
 
     loop {
-        let cfg_run = cfg.clone();
+        let active_cfg_run = active_cfg.clone();
+        let config_rx_run = config_rx.clone();
+        let audio_cmd_run = audio_cmd_tx.clone();
         let tools_run = tools.clone();
         let event_tx_run = event_tx.clone();
         let shared_run = shared.clone();
         let mic_rx_run = mic_rx.clone();
-        let playback_tx_run = playback_tx.clone();
+        let playback_slot_run = playback_slot.clone();
         let speaker_q_run = speaker_queued.clone();
         let confirm_rx_run = confirm_rx.clone();
         let interrupt_rx_run = interrupt_rx.clone();
 
         let handle = tokio::spawn(async move {
             run_session(
-                cfg_run,
+                active_cfg_run,
+                config_rx_run,
+                audio_cmd_run,
                 tools_run,
                 event_tx_run,
                 shared_run,
                 mic_rx_run,
-                playback_tx_run,
+                playback_slot_run,
                 speaker_q_run,
                 confirm_rx_run,
                 interrupt_rx_run,
@@ -302,23 +475,96 @@ struct ToolBatchOutcome {
     saw_untrusted: bool,
 }
 
+fn config_requires_reconnect(old: &config::ApiConfig, new: &config::ApiConfig) -> bool {
+    old.api_key() != new.api_key()
+        || old.model() != new.model()
+        || old.api_version() != new.api_version()
+        || old.voice() != new.voice()
+        || old.assistant_name() != new.assistant_name()
+        || old.user_name != new.user_name
+}
+
+async fn apply_config_update(
+    cfg: &mut config::ApiConfig,
+    new_cfg: config::ApiConfig,
+    active_cfg: &Arc<Mutex<config::ApiConfig>>,
+    shared: &Arc<Mutex<SharedState>>,
+    audio_cmd_tx: &std::sync::mpsc::Sender<AudioCmd>,
+    event_tx: &broadcast::Sender<AppEvent>,
+) -> bool {
+    let devices_changed =
+        cfg.input_device != new_cfg.input_device || cfg.output_device != new_cfg.output_device;
+    let reconnect_needed = config_requires_reconnect(cfg, &new_cfg);
+
+    {
+        let mut s = shared.lock().await;
+        s.push_to_talk = new_cfg.push_to_talk();
+        if !s.push_to_talk {
+            s.ptt_active = false;
+        }
+        if reconnect_needed {
+            s.resume_handle = None;
+        }
+    }
+
+    if devices_changed {
+        let _ = audio_cmd_tx.send(AudioCmd::Reload {
+            input_device: new_cfg.input_device.clone(),
+            output_device: new_cfg.output_device.clone(),
+        });
+    }
+
+    *cfg = new_cfg.clone();
+    *active_cfg.lock().await = new_cfg;
+    let _ = event_tx.send(AppEvent::Log("Settings saved".to_string()));
+    tracing::info!(
+        "settings updated (ptt={}, proactive={}, reconnect={reconnect_needed}, audio_reload={devices_changed})",
+        cfg.push_to_talk(),
+        cfg.proactive_audio()
+    );
+    reconnect_needed
+}
+
+async fn sleep_or_reconfig(
+    secs: u64,
+    cfg: &mut config::ApiConfig,
+    active_cfg: &Arc<Mutex<config::ApiConfig>>,
+    config_rx: &Arc<Mutex<mpsc::Receiver<config::ApiConfig>>>,
+    shared: &Arc<Mutex<SharedState>>,
+    audio_cmd_tx: &std::sync::mpsc::Sender<AudioCmd>,
+    event_tx: &broadcast::Sender<AppEvent>,
+) -> bool {
+    let mut cg = config_rx.lock().await;
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(secs)) => false,
+        Some(new_cfg) = cg.recv() => {
+            apply_config_update(cfg, new_cfg, active_cfg, shared, audio_cmd_tx, event_tx).await;
+            true
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
-    cfg: config::ApiConfig,
+    active_cfg: Arc<Mutex<config::ApiConfig>>,
+    config_rx: Arc<Mutex<mpsc::Receiver<config::ApiConfig>>>,
+    audio_cmd_tx: std::sync::mpsc::Sender<AudioCmd>,
     tools: Arc<tools::ToolRegistry>,
     event_tx: broadcast::Sender<AppEvent>,
     shared: Arc<Mutex<SharedState>>,
     mic_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
-    playback_tx: mpsc::Sender<PlaybackCmd>,
+    playback_slot: PlaybackSlot,
     speaker_queued: Arc<AtomicUsize>,
     confirm_rx: Arc<Mutex<mpsc::Receiver<ConfirmResponse>>>,
     interrupt_rx: Arc<Mutex<mpsc::Receiver<()>>>,
 ) {
+    let mut cfg = active_cfg.lock().await.clone();
     tracing::info!(
-        "run_session starting (model={}, api={}, tools={})",
+        "run_session starting (model={}, api={}, tools={}, ptt={})",
         cfg.model(),
         cfg.api_version(),
-        tools.declarations().len()
+        tools.declarations().len(),
+        cfg.push_to_talk()
     );
 
     let tool_json = tools.gemini_tool_json();
@@ -382,8 +628,21 @@ async fn run_session(
                 if used_resume {
                     shared.lock().await.resume_handle = None;
                 }
-                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                backoff_secs = (backoff_secs * 2).min(30);
+                if sleep_or_reconfig(
+                    backoff_secs,
+                    &mut cfg,
+                    &active_cfg,
+                    &config_rx,
+                    &shared,
+                    &audio_cmd_tx,
+                    &event_tx,
+                )
+                .await
+                {
+                    backoff_secs = 2;
+                } else {
+                    backoff_secs = (backoff_secs * 2).min(30);
+                }
                 continue;
             }
         };
@@ -394,8 +653,21 @@ async fn run_session(
             if used_resume {
                 shared.lock().await.resume_handle = None;
             }
-            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-            backoff_secs = (backoff_secs * 2).min(30);
+            if sleep_or_reconfig(
+                backoff_secs,
+                &mut cfg,
+                &active_cfg,
+                &config_rx,
+                &shared,
+                &audio_cmd_tx,
+                &event_tx,
+            )
+            .await
+            {
+                backoff_secs = 2;
+            } else {
+                backoff_secs = (backoff_secs * 2).min(30);
+            }
             continue;
         }
 
@@ -520,6 +792,7 @@ async fn run_session(
         let _ = event_tx.send(AppEvent::Log("connected".to_string()));
 
         let mut echo_guard = echo::EchoGuard::new();
+        let mut ptt_was_active = false;
         let session_started = Instant::now();
         let mut last_ping = Instant::now();
         let mut awaiting_response_since: Option<Instant> = None;
@@ -528,6 +801,7 @@ async fn run_session(
         let mut proactive = proactive::ProactiveEngine::new(cfg.proactive_audio());
         let mut saw_untrusted_in_turn = false;
         let mut should_shutdown = false;
+        let mut immediate_reconnect = false;
 
         // Interval created OUTSIDE select! so keepalive ping, stall detection, monitors & proactive always tick
         let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -535,6 +809,7 @@ async fn run_session(
 
         let mut mic_guard = mic_rx.lock().await;
         let mut int_guard = interrupt_rx.lock().await;
+        let mut cfg_guard = config_rx.lock().await;
 
         loop {
             tokio::select! {
@@ -551,19 +826,44 @@ async fn run_session(
                         .map(|&c| i16::from_le_bytes(c))
                         .collect();
                     let level = dsp::pcm_level(&samples);
-                    let _ = event_tx.send(AppEvent::AudioLevel(if is_muted { 0.0 } else { level }));
+                    let _ = event_tx.send(AppEvent::AudioLevel(
+                        if is_muted || (ptt_mode && !ptt_active) {
+                            0.0
+                        } else {
+                            level
+                        },
+                    ));
 
                     if is_muted {
                         continue;
                     }
 
                     let speaker_playing = speaker_queued.load(Ordering::Acquire) > 0;
-                    let decision = if ptt_mode {
-                        if ptt_active {
-                            MicDecision::SendAudio
-                        } else {
-                            echo_guard.evaluate_mic(0.0, speaker_playing, Instant::now())
+
+                    if ptt_mode {
+                        if ptt_active && !ptt_was_active {
+                            tracing::info!("PTT pressed — streaming mic audio");
+                            let was_speaking = {
+                                let mut s = shared.lock().await;
+                                let prev = s.is_speaking;
+                                s.is_speaking = false;
+                                prev
+                            };
+                            if speaker_playing || was_speaking {
+                                send_playback(&playback_slot, PlaybackCmd::Clear).await;
+                                echo_guard.reset();
+                                let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
+                            }
+                        } else if !ptt_active && ptt_was_active {
+                            tracing::info!("PTT released — finishing utterance");
                         }
+                        ptt_was_active = ptt_active;
+                    } else {
+                        ptt_was_active = false;
+                    }
+
+                    let decision = if ptt_mode {
+                        echo_guard.evaluate_ptt(ptt_active, Instant::now())
                     } else {
                         echo_guard.evaluate_mic(level, speaker_playing, Instant::now())
                     };
@@ -577,6 +877,7 @@ async fn run_session(
                             shared.lock().await.last_user_speech = Instant::now();
                         }
                         MicDecision::SendStreamEnd => {
+                            tracing::info!("sending audioStreamEnd — awaiting response");
                             if let Err(e) = session.send_audio_stream_end().await {
                                 tracing::warn!("send audioStreamEnd: {e}");
                             }
@@ -627,7 +928,7 @@ async fn run_session(
 
                             shared.lock().await.is_speaking = true;
                             let _ = event_tx.send(AppEvent::StateChange(AppState::Speaking));
-                            let _ = playback_tx.send(PlaybackCmd::Audio(data)).await;
+                            send_playback(&playback_slot, PlaybackCmd::Audio(data)).await;
                         }
 
                         gemini::GeminiEvent::OutputTranscript(text) => {
@@ -646,7 +947,7 @@ async fn run_session(
                             awaiting_response_since = None;
                             response_timer = None;
                             tracing::info!("server interrupted playback — clearing speaker buffer");
-                            let _ = playback_tx.send(PlaybackCmd::Clear).await;
+                            send_playback(&playback_slot, PlaybackCmd::Clear).await;
                             echo_guard.reset();
                             shared.lock().await.is_speaking = false;
                             let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
@@ -728,13 +1029,35 @@ async fn run_session(
 
                 Some(()) = int_guard.recv() => {
                     tracing::info!("user interrupt — clearing speaker buffer");
-                    let _ = playback_tx.send(PlaybackCmd::Clear).await;
+                    send_playback(&playback_slot, PlaybackCmd::Clear).await;
                     echo_guard.reset();
                     awaiting_response_since = None;
                     response_timer = None;
                     shared.lock().await.is_speaking = false;
                     let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
                     let _ = event_tx.send(AppEvent::Log("interrupted".to_string()));
+                }
+
+                Some(new_cfg) = cfg_guard.recv() => {
+                    let old_ptt = cfg.push_to_talk();
+                    let reconnect = apply_config_update(
+                        &mut cfg,
+                        new_cfg,
+                        &active_cfg,
+                        &shared,
+                        &audio_cmd_tx,
+                        &event_tx,
+                    )
+                    .await;
+                    proactive.set_enabled(cfg.proactive_audio());
+                    if old_ptt != cfg.push_to_talk() {
+                        echo_guard.reset();
+                        ptt_was_active = false;
+                    }
+                    if reconnect {
+                        immediate_reconnect = true;
+                        break;
+                    }
                 }
 
                 Some(alerts) = monitor_rx.recv() => {
@@ -828,6 +1151,7 @@ async fn run_session(
         tool_worker_handle.abort();
         drop(mic_guard);
         drop(int_guard);
+        drop(cfg_guard);
 
         // Save compact session summary with real detected language
         {
@@ -850,10 +1174,29 @@ async fn run_session(
             return;
         }
 
+        if immediate_reconnect {
+            tracing::info!("reconnecting immediately to apply updated settings...");
+            backoff_secs = 2;
+            continue;
+        }
+
         tracing::info!("session ended, reconnecting in {}s...", backoff_secs);
         let _ = event_tx.send(AppEvent::Log(format!("reconnecting in {backoff_secs}s...")));
-        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-        backoff_secs = (backoff_secs * 2).min(30);
+        if sleep_or_reconfig(
+            backoff_secs,
+            &mut cfg,
+            &active_cfg,
+            &config_rx,
+            &shared,
+            &audio_cmd_tx,
+            &event_tx,
+        )
+        .await
+        {
+            backoff_secs = 2;
+        } else {
+            backoff_secs = (backoff_secs * 2).min(30);
+        }
     }
 }
 

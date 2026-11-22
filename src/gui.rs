@@ -52,19 +52,24 @@ struct ConfirmDisplay {
 }
 
 struct SetupForm {
+    is_settings: bool,
+    base_config: ApiConfig,
     api_key: String,
+    show_api_key: bool,
     voice: String,
+    assistant_name: String,
     user_name: String,
     input_device: String,
     output_device: String,
     push_to_talk: bool,
+    proactive_audio: bool,
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
     error_msg: Option<String>,
 }
 
 impl SetupForm {
-    fn new(initial_error: Option<String>) -> Self {
+    fn new_setup(initial_error: Option<String>) -> Self {
         let available_inputs = crate::audio::list_input_devices()
             .into_iter()
             .map(|(n, _)| n)
@@ -74,15 +79,48 @@ impl SetupForm {
             .map(|(n, _)| n)
             .collect();
         Self {
+            is_settings: false,
+            base_config: ApiConfig::default(),
             api_key: String::new(),
+            show_api_key: false,
             voice: "Aoede".to_string(),
+            assistant_name: "Boogie".to_string(),
             user_name: String::new(),
             input_device: String::new(),
             output_device: String::new(),
             push_to_talk: false,
+            proactive_audio: true,
             available_inputs,
             available_outputs,
             error_msg: initial_error,
+        }
+    }
+
+    fn from_config(cfg: Option<&ApiConfig>) -> Self {
+        let available_inputs = crate::audio::list_input_devices()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        let available_outputs = crate::audio::list_output_devices()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        let base = cfg.cloned().unwrap_or_default();
+        Self {
+            is_settings: true,
+            api_key: base.gemini_api_key.clone(),
+            show_api_key: false,
+            voice: base.voice().to_string(),
+            assistant_name: base.assistant_name().to_string(),
+            user_name: base.user_name.clone().unwrap_or_default(),
+            input_device: base.input_device.clone().unwrap_or_default(),
+            output_device: base.output_device.clone().unwrap_or_default(),
+            push_to_talk: base.push_to_talk(),
+            proactive_audio: base.proactive_audio(),
+            available_inputs,
+            available_outputs,
+            error_msg: None,
+            base_config: base,
         }
     }
 }
@@ -145,6 +183,7 @@ pub struct BoogieGui {
     confirm_tx: mpsc::Sender<ConfirmResponse>,
     interrupt_tx: mpsc::Sender<()>,
     config_tx: mpsc::Sender<ApiConfig>,
+    current_cfg: Option<ApiConfig>,
     muted: bool,
     push_to_talk: bool,
     ptt_holding: bool,
@@ -162,6 +201,7 @@ pub struct BoogieGui {
 }
 
 impl BoogieGui {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         event_rx: broadcast::Receiver<AppEvent>,
@@ -169,6 +209,7 @@ impl BoogieGui {
         confirm_tx: mpsc::Sender<ConfirmResponse>,
         interrupt_tx: mpsc::Sender<()>,
         config_tx: mpsc::Sender<ApiConfig>,
+        initial_cfg: Option<ApiConfig>,
         initial_cfg_err: Option<String>,
     ) -> Self {
         setup_fonts(&cc.egui_ctx);
@@ -188,7 +229,7 @@ impl BoogieGui {
         });
 
         let ptt = shared.try_lock().map(|s| s.push_to_talk).unwrap_or(false);
-        let setup_form = initial_cfg_err.map(|e| SetupForm::new(Some(e)));
+        let setup_form = initial_cfg_err.map(|e| SetupForm::new_setup(Some(e)));
 
         Self {
             state: if setup_form.is_some() {
@@ -218,6 +259,7 @@ impl BoogieGui {
             confirm_tx,
             interrupt_tx,
             config_tx,
+            current_cfg: initial_cfg,
             muted: false,
             push_to_talk: ptt,
             ptt_holding: false,
@@ -459,6 +501,9 @@ impl BoogieGui {
         if self.muted {
             return CRIMSON;
         }
+        if self.push_to_talk && self.state == AppState::Listening {
+            return if self.ptt_holding { MINT } else { VIOLET };
+        }
         match self.state {
             AppState::Listening => VIOLET,
             AppState::Speaking => CYAN,
@@ -470,6 +515,13 @@ impl BoogieGui {
     fn state_label(&self) -> &'static str {
         if self.muted {
             return "MUTED";
+        }
+        if self.push_to_talk && self.state == AppState::Listening {
+            return if self.ptt_holding {
+                "PTT LIVE"
+            } else {
+                "HOLD SPACE"
+            };
         }
         match self.state {
             AppState::Listening => "LISTENING",
@@ -615,7 +667,7 @@ impl BoogieGui {
             Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 14)),
         );
 
-        let controls_w = 108.0;
+        let controls_w = 142.0;
         let drag_rect = Rect::from_min_max(
             Pos2::new(
                 header_rect.left() + RESIZE_MARGIN,
@@ -753,14 +805,28 @@ impl BoogieGui {
             );
         }
 
-        // Custom crisp vector window buttons (Min, Max, Close)
+        // Custom crisp vector window & settings buttons (Settings, Min, Max, Close)
         let btn_size = Vec2::new(32.0, 26.0);
         let right_edge = header_rect.right() - 8.0;
 
         let close_rect = Rect::from_center_size(Pos2::new(right_edge - 16.0, cy), btn_size);
         let max_rect = Rect::from_center_size(Pos2::new(right_edge - 50.0, cy), btn_size);
         let min_rect = Rect::from_center_size(Pos2::new(right_edge - 84.0, cy), btn_size);
+        let settings_rect = Rect::from_center_size(Pos2::new(right_edge - 118.0, cy), btn_size);
 
+        let settings_open = self.setup_form.as_ref().is_some_and(|f| f.is_settings);
+        if draw_win_button(
+            ui,
+            settings_rect,
+            "win_settings",
+            WinBtnKind::Settings(settings_open),
+        ) {
+            if settings_open {
+                self.setup_form = None;
+            } else {
+                self.setup_form = Some(SetupForm::from_config(self.current_cfg.as_ref()));
+            }
+        }
         if draw_win_button(ui, min_rect, "win_min", WinBtnKind::Minimize) {
             ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
         }
@@ -1532,11 +1598,29 @@ impl BoogieGui {
     }
 
     fn draw_setup_dialog(&mut self, ctx: &egui::Context) {
-        let Some(form) = self.setup_form.as_mut() else {
+        let Some(is_settings) = self.setup_form.as_ref().map(|f| f.is_settings) else {
             return;
         };
 
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("setup_scrim"))
+            .fixed_pos(screen.left_top())
+            .order(Order::Middle)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(
+                    screen,
+                    CornerRadius::ZERO,
+                    Color32::from_rgba_unmultiplied(4, 3, 12, 170),
+                );
+                ui.allocate_rect(screen, Sense::click());
+            });
+
+        let mut close_modal = is_settings && ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let mut submitted_cfg: Option<ApiConfig> = None;
+
+        let Some(form) = self.setup_form.as_mut() else {
+            return;
+        };
 
         egui::Window::new("boogie_setup")
             .title_bar(false)
@@ -1555,21 +1639,29 @@ impl BoogieGui {
                     .inner_margin(egui::Margin::same(22)),
             )
             .show(ctx, |ui| {
-                ui.set_min_width(320.0);
-                ui.set_max_width(400.0);
+                ui.set_min_width(340.0);
+                ui.set_max_width(420.0);
 
                 ui.label(
-                    RichText::new("BOOGIE SETUP")
-                        .size(10.5)
-                        .color(CYAN)
-                        .family(FontFamily::Monospace),
+                    RichText::new(if form.is_settings {
+                        "BOOGIE SETTINGS"
+                    } else {
+                        "BOOGIE SETUP"
+                    })
+                    .size(10.5)
+                    .color(CYAN)
+                    .family(FontFamily::Monospace),
                 );
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new("Connect Gemini Live API")
-                        .size(16.0)
-                        .color(TEXT_BRIGHT)
-                        .strong(),
+                    RichText::new(if form.is_settings {
+                        "Preferences & Audio"
+                    } else {
+                        "Connect Gemini Live API"
+                    })
+                    .size(16.0)
+                    .color(TEXT_BRIGHT)
+                    .strong(),
                 );
                 if let Some(err) = &form.error_msg {
                     ui.add_space(6.0);
@@ -1578,12 +1670,16 @@ impl BoogieGui {
 
                 ui.add_space(12.0);
                 ui.label(RichText::new("Gemini API Key").size(12.0).color(TEXT_SOFT));
-                ui.add(
-                    egui::TextEdit::singleline(&mut form.api_key)
-                        .password(true)
-                        .hint_text("AIza...")
-                        .desired_width(f32::INFINITY),
-                );
+                ui.horizontal(|ui| {
+                    let key_w = (ui.available_width() - 62.0).max(180.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.api_key)
+                            .password(!form.show_api_key)
+                            .hint_text("AIza...")
+                            .desired_width(key_w),
+                    );
+                    ui.checkbox(&mut form.show_api_key, "Show");
+                });
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -1596,6 +1692,14 @@ impl BoogieGui {
                             }
                         });
                 });
+
+                ui.add_space(6.0);
+                ui.label(RichText::new("Assistant Name").size(12.0).color(TEXT_SOFT));
+                ui.add(
+                    egui::TextEdit::singleline(&mut form.assistant_name)
+                        .hint_text("Boogie")
+                        .desired_width(f32::INFINITY),
+                );
 
                 ui.add_space(6.0);
                 ui.label(
@@ -1619,7 +1723,7 @@ impl BoogieGui {
                             form.input_device.as_str()
                         };
                         egui::ComboBox::from_id_salt("setup_mic")
-                            .selected_text(truncate_str(sel, 28))
+                            .selected_text(truncate_str(sel, 30))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
                                     &mut form.input_device,
@@ -1643,7 +1747,7 @@ impl BoogieGui {
                             form.output_device.as_str()
                         };
                         egui::ComboBox::from_id_salt("setup_spk")
-                            .selected_text(truncate_str(sel, 28))
+                            .selected_text(truncate_str(sel, 30))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
                                     &mut form.output_device,
@@ -1659,61 +1763,108 @@ impl BoogieGui {
 
                 ui.add_space(8.0);
                 ui.checkbox(&mut form.push_to_talk, "Push-to-Talk (hold Space)");
+                ui.checkbox(&mut form.proactive_audio, "Proactive check-ins");
+
+                ui.add_space(6.0);
+                let log_path = crate::config::active_config_dir().join("boogie.log");
+                ui.label(
+                    RichText::new(format!("Log: {}", log_path.display()))
+                        .size(10.0)
+                        .color(TEXT_MUTED)
+                        .family(FontFamily::Monospace),
+                );
 
                 ui.add_space(14.0);
-                if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new("Save & Connect")
-                                .size(13.0)
-                                .color(BG_OBSIDIAN)
-                                .strong(),
-                        )
-                        .fill(CYAN)
-                        .corner_radius(CornerRadius::same(14))
-                        .min_size(Vec2::new(140.0, 36.0)),
-                    )
-                    .clicked()
-                {
-                    let key = form.api_key.trim().to_string();
-                    if key.is_empty() {
-                        form.error_msg = Some("Please enter your Gemini API key.".to_string());
+                ui.horizontal(|ui| {
+                    let save_label = if form.is_settings {
+                        "Save & Apply"
                     } else {
-                        let cfg = ApiConfig {
-                            gemini_api_key: key,
-                            voice: Some(form.voice.clone()),
-                            user_name: if form.user_name.trim().is_empty() {
+                        "Save & Connect"
+                    };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(save_label)
+                                    .size(13.0)
+                                    .color(BG_OBSIDIAN)
+                                    .strong(),
+                            )
+                            .fill(CYAN)
+                            .corner_radius(CornerRadius::same(14))
+                            .min_size(Vec2::new(140.0, 36.0)),
+                        )
+                        .clicked()
+                    {
+                        let key = form.api_key.trim().to_string();
+                        if key.is_empty() {
+                            form.error_msg = Some("Please enter your Gemini API key.".to_string());
+                        } else {
+                            let mut cfg = form.base_config.clone();
+                            cfg.gemini_api_key = key;
+                            cfg.voice = Some(form.voice.clone());
+                            cfg.assistant_name = if form.assistant_name.trim().is_empty() {
+                                None
+                            } else {
+                                Some(form.assistant_name.trim().to_string())
+                            };
+                            cfg.user_name = if form.user_name.trim().is_empty() {
                                 None
                             } else {
                                 Some(form.user_name.trim().to_string())
-                            },
-                            input_device: if form.input_device.is_empty() {
+                            };
+                            cfg.input_device = if form.input_device.is_empty() {
                                 None
                             } else {
                                 Some(form.input_device.clone())
-                            },
-                            output_device: if form.output_device.is_empty() {
+                            };
+                            cfg.output_device = if form.output_device.is_empty() {
                                 None
                             } else {
                                 Some(form.output_device.clone())
-                            },
-                            push_to_talk: Some(form.push_to_talk),
-                            proactive_audio: Some(true),
-                            dashboard_enabled: Some(false),
-                            ..Default::default()
-                        };
-                        match cfg.save() {
-                            Ok(_) => submitted_cfg = Some(cfg),
-                            Err(e) => form.error_msg = Some(format!("Save failed: {e}")),
+                            };
+                            cfg.push_to_talk = Some(form.push_to_talk);
+                            cfg.proactive_audio = Some(form.proactive_audio);
+                            if !form.is_settings && cfg.dashboard_enabled.is_none() {
+                                cfg.dashboard_enabled = Some(false);
+                            }
+                            match cfg.save() {
+                                Ok(_) => submitted_cfg = Some(cfg),
+                                Err(e) => form.error_msg = Some(format!("Save failed: {e}")),
+                            }
                         }
                     }
-                }
+
+                    if form.is_settings {
+                        ui.add_space(10.0);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Cancel").size(12.5).color(TEXT_SOFT),
+                                )
+                                .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 12))
+                                .stroke(Stroke::new(
+                                    1.0_f32,
+                                    Color32::from_rgba_unmultiplied(255, 255, 255, 36),
+                                ))
+                                .corner_radius(CornerRadius::same(14))
+                                .min_size(Vec2::new(92.0, 36.0)),
+                            )
+                            .clicked()
+                        {
+                            close_modal = true;
+                        }
+                    }
+                });
             });
 
         if let Some(cfg) = submitted_cfg {
+            self.current_cfg = Some(cfg.clone());
             self.push_to_talk = cfg.push_to_talk();
+            self.ptt_holding = false;
             self.setup_form = None;
             let _ = self.config_tx.try_send(cfg);
+        } else if close_modal {
+            self.setup_form = None;
         }
     }
 }
@@ -1735,15 +1886,23 @@ impl eframe::App for BoogieGui {
             return;
         }
 
-        // Push-to-talk Space key tracking (disabled while typing in setup inputs)
-        if self.push_to_talk && self.setup_form.is_none() && !ctx.wants_keyboard_input() {
-            let holding = ctx.input(|i| i.key_down(egui::Key::Space));
-            if holding != self.ptt_holding {
+        // Push-to-talk Space key tracking (disabled while modal/input active or window unfocused)
+        if self.push_to_talk {
+            let can_ptt = self.setup_form.is_none()
+                && !ctx.wants_keyboard_input()
+                && ctx.input(|i| i.viewport().focused.unwrap_or(true));
+            let holding = can_ptt && ctx.input(|i| i.key_down(egui::Key::Space));
+            if holding != self.ptt_holding
+                && let Ok(mut s) = self.shared.try_lock()
+            {
+                s.ptt_active = holding;
                 self.ptt_holding = holding;
-                if let Ok(mut s) = self.shared.try_lock() {
-                    s.ptt_active = holding;
-                }
             }
+        } else if self.ptt_holding
+            && let Ok(mut s) = self.shared.try_lock()
+        {
+            s.ptt_active = false;
+            self.ptt_holding = false;
         }
 
         self.metrics.refresh();
@@ -1830,19 +1989,27 @@ impl eframe::App for BoogieGui {
 // --- Custom Vector Icon Painters ---
 
 enum WinBtnKind {
+    Settings(bool),
     Minimize,
     Maximize(bool),
     Close,
 }
 
 fn draw_win_button(ui: &mut egui::Ui, rect: Rect, id: &str, kind: WinBtnKind) -> bool {
-    let resp = ui.interact(rect, ui.id().with(id), Sense::click());
+    let mut resp = ui.interact(rect, ui.id().with(id), Sense::click());
+    if matches!(kind, WinBtnKind::Settings(_)) {
+        resp = resp.on_hover_text("Settings");
+    }
     let painter = ui.painter();
+    let is_active = matches!(kind, WinBtnKind::Settings(true));
 
-    if resp.hovered() {
+    if resp.hovered() || is_active {
         let hover_bg = match kind {
             WinBtnKind::Close => {
                 Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 190)
+            }
+            WinBtnKind::Settings(true) => {
+                Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 36)
             }
             _ => Color32::from_rgba_unmultiplied(255, 255, 255, 22),
         };
@@ -1850,7 +2017,9 @@ fn draw_win_button(ui: &mut egui::Ui, rect: Rect, id: &str, kind: WinBtnKind) ->
     }
 
     let c = rect.center();
-    let fg = if resp.hovered() {
+    let fg = if is_active {
+        CYAN
+    } else if resp.hovered() {
         TEXT_BRIGHT
     } else {
         TEXT_SOFT
@@ -1858,6 +2027,15 @@ fn draw_win_button(ui: &mut egui::Ui, rect: Rect, id: &str, kind: WinBtnKind) ->
     let stroke = Stroke::new(1.3_f32, fg);
 
     match kind {
+        WinBtnKind::Settings(_) => {
+            painter.circle_stroke(c, 3.6, stroke);
+            painter.circle_stroke(c, 1.4, stroke);
+            for step in 0..8 {
+                let angle = step as f32 * std::f32::consts::FRAC_PI_4;
+                let dir = Vec2::new(angle.cos(), angle.sin());
+                painter.line_segment([c + dir * 3.8, c + dir * 5.7], stroke);
+            }
+        }
         WinBtnKind::Minimize => {
             painter.line_segment([c + Vec2::new(-5.0, 0.5), c + Vec2::new(5.0, 0.5)], stroke);
         }
@@ -2127,6 +2305,7 @@ pub fn run_gui(
     confirm_tx: mpsc::Sender<ConfirmResponse>,
     interrupt_tx: mpsc::Sender<()>,
     config_tx: mpsc::Sender<ApiConfig>,
+    initial_cfg: Option<ApiConfig>,
     initial_cfg_err: Option<String>,
 ) -> Result<(), eframe::Error> {
     let mut viewport = egui::ViewportBuilder::default()
@@ -2157,6 +2336,7 @@ pub fn run_gui(
                 confirm_tx,
                 interrupt_tx,
                 config_tx,
+                initial_cfg,
                 initial_cfg_err,
             )))
         }),
