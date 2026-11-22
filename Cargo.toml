@@ -2,7 +2,12 @@
 name = "boogie"
 version = "0.1.0"
 edition = "2024"
-description = "Boogie — real-time voice AI assistant"
+description = "Boogie — ultra-fast native Rust real-time voice AI assistant for Windows powered by Gemini Live API"
+license = "MIT"
+repository = "https://github.com/thodark/Boogie-AI-Assistant"
+homepage = "https://github.com/thodark/Boogie-AI-Assistant"
+keywords = ["ai", "voice-assistant", "gemini", "windows", "egui"]
+categories = ["gui", "multimedia::audio", "os::windows-apis"]
 
 [dependencies]
 # Async runtime

@@ -4,14 +4,16 @@
 
 # Boogie — Native Rust Voice AI Assistant
 
-**Ultra-fast, lightweight real-time voice AI assistant for Windows powered by Gemini Live API & a 60 FPS 3D Liquid Glass GLSL Orb.**
+**Open-source, JARVIS-style real-time voice AI assistant & desktop AI agent for Windows — powered by Gemini Live API & a 60 FPS 3D Liquid Glass GLSL Orb.**
 
+[![Release](https://img.shields.io/github/v/release/thodark/Boogie-AI-Assistant?color=22D3EE&label=Release)](https://github.com/thodark/Boogie-AI-Assistant/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-10B981)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-Edition_2024-orange?logo=rust&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows_x64-0078D6?logo=windows&logoColor=white)
 ![Cold Start](https://img.shields.io/badge/Window_Ready-~137ms-22D3EE)
 ![Audio TTFB](https://img.shields.io/badge/Audio_TTFB-~580ms-F59E0B)
 ![RAM](https://img.shields.io/badge/Private_RAM-~33_MB-8B5CF6)
-![Binary](https://img.shields.io/badge/Single_Binary-28.0_MB-10B981)
+![Binary](https://img.shields.io/badge/Single_Binary-28.3_MB-10B981)
 ![Renderer](https://img.shields.io/badge/UI-egui_+_GLSL_3D_Shader-EC4899)
 
 <br />
@@ -90,14 +92,14 @@ Instead of chaining three slow stages (**Speech-to-Text → Chat LLM → Text-to
 - **Interactive 3D:** Subtle cursor parallax tilts lighting and camera; clicking the orb triggers a liquid energy pulse.
 
 ### 2. Modern Frameless Obsidian UI (`gui.rs`)
-- **Custom Frameless Window:** Native Neon Boogie app icon (window, taskbar & `.exe`), ultra-slim draggable header, 8-edge resizing, live pulsing status pill, accurate CPU/RAM telemetry, error banners, and crisp vector window controls.
-- **First-Run Onboarding Modal:** Launch without manual JSON editing — enter your Gemini API key, select voice, mic/speaker devices, and Push-to-Talk right inside the app.
-- **Live Captions + Frosted Glass Drawer:** Clean centered subtitles fade gently below the orb; click captions or the History button to slide up a frosted glass conversation drawer with smart merged sentences and compact tool chips (`⚡ Computer Settings · brightness down`).
+- **Custom Frameless Window:** Native Neon Boogie app icon (window, taskbar & `.exe`), ultra-slim draggable header, 8-edge resizing, live pulsing status pill (`LISTENING`, `SPEAKING`, `THINKING`, `HOLD SPACE` / `PTT LIVE`, `MUTED`), accurate CPU/RAM telemetry, error banners, and crisp vector window controls.
+- **First-Run Onboarding & In-App Settings Modal:** Launch without manual JSON editing, and reopen **Settings** anytime via the top-right gear button — hot-reload your Gemini API key, voice, assistant/user name, mic/speaker devices, Push-to-Talk (`Space`), and proactive check-ins live without restarting.
+- **Live Captions + Frosted Glass Drawer:** Clean centered subtitles fade gently below the orb; click captions or the History button to slide up a frosted glass conversation drawer with smart word-wrapped bubbles, merged streaming sentences, and compact tool chips (`⚡ Computer Settings · brightness down`).
 - **Floating Glass Control Dock:** Centered pill dock with Mute toggle, 14-bar live spectrum visualizer, instant Interrupt/Stop button, and Conversation Drawer toggle.
 
 ### 3. Resilient Voice Pipeline & Real Screen Vision
-- **Native WASAPI Audio (`audio.rs`) + Hardware-Aware Echo Guard (`echo.rs`):** Multi-format (`f32`/`i16`/`u16`) capture & playback with anti-alias downsampling, instant speaker buffer clearing (`< 20 ms`) on barge-in or server `interrupted`, 450ms speech hangover, `audio/pcm;rate=16000`, and `audioStreamEnd` signaling at 750ms silence.
-- **Resilient Gemini Live Client (`gemini.rs`, `main.rs`):** Per-session non-blocking background tool worker with 25s timeout & panic isolation, 20s WebSocket keepalive pings, response-only stall watchdog (never falsely disconnects during quiet listening), `goAway` & 14-minute session rotation, exponential reconnect backoff, and long-term session summary recall.
+- **Native WASAPI Audio (`audio.rs`) + Hardware-Aware Echo Guard (`echo.rs`):** Multi-format (`f32`/`i16`/`u16`) capture & playback with anti-alias resampling, a 180-second mono speaker ring buffer (prevents skipping on fast, multi-minute Gemini bursts), instant speaker buffer clearing (`< 20 ms`) on barge-in or server `interrupted`, 450ms speech hangover + pre-response echo guard reset, `audio/pcm;rate=16000`, and `audioStreamEnd` signaling.
+- **Resilient Gemini Live Client (`gemini.rs`, `main.rs`):** Per-session non-blocking background tool worker with 25s timeout & panic isolation, 20s WebSocket keepalive pings, response-only stall watchdog (never falsely disconnects during quiet listening), turn-safe deferred `goAway` & 14-minute session rotation (never cuts off mid-sentence), exponential reconnect backoff, persistent `boogie.log` diagnostics, and long-term session summary recall.
 - **Native App Launcher (`open_app.rs`) & Fast Browser Control (`browser.rs`):** Resolves & focuses/launches any installed Windows app via Win32 window enumeration, Start Menu `.lnk` shortcuts, Windows Registry `App Paths`, `PATH`, URI schemes, and UWP `Get-StartApps`; opens URLs directly in your default or requested browser (`brave`, `chrome`, `edge`, `firefox`) without hanging.
 - **Real Screen & Browser Vision (`screen_process`, `browser_control` `screenshot`):** Captures monitors or Chromium pages, resizes to `≤1280px` JPEG, and streams directly into Gemini Live `realtimeInput.video`.
 
@@ -130,28 +132,27 @@ flowchart LR
 
 ## Quick Start
 
-### Prerequisites
+### Option A: Download Prebuilt Binary (Recommended — No Rust Required)
+1. Download **`Boogie-Windows-x64.zip`** (or standalone `boogie.exe`) from [**GitHub Releases**](https://github.com/thodark/Boogie-AI-Assistant/releases/latest).
+2. Extract anywhere and launch `boogie.exe` — paste your **Google Gemini API key** in the built-in Setup screen.
+
+### Option B: Build from Source
+
+#### Prerequisites
 - **Windows 10 / 11 (64-bit)**
 - **Rust toolchain** (Edition 2024 — Rust 1.85+ via [rustup.rs](https://rustup.rs))
 - A **Google Gemini API key** with Gemini Live API access
-
-### 1. Clone & Build
 
 ```powershell
 git clone https://github.com/thodark/Boogie-AI-Assistant.git
 cd Boogie-AI-Assistant
 cargo build --release
-```
-
-### 2. Run & Configure
-
-Just launch the binary — if no config exists yet, Boogie opens the **built-in Setup screen** where you can paste your Gemini API key and choose your voice, mic, and speaker:
-
-```powershell
 .\target\release\boogie.exe
 ```
 
-Or configure manually by copying `config/api_keys.example.json` to `target/release/config/api_keys.json` (also searched in `./config/api_keys.json` and `%APPDATA%\Boogie\api_keys.json`):
+### Configuration (Optional Manual Setup)
+
+When launched without config, Boogie opens the **built-in Setup screen** (and you can edit any setting anytime via the top-right **Settings** gear icon). To pre-configure manually, copy `config/api_keys.example.json` to `config/api_keys.json` next to `boogie.exe` (also searched in `./config/api_keys.json` and `%APPDATA%\Boogie\api_keys.json`):
 
 ```json
 {
@@ -169,7 +170,7 @@ Or configure manually by copying `config/api_keys.example.json` to `target/relea
 }
 ```
 
-> **Tip:** Set `RUST_LOG=boogie=debug` if you need detailed diagnostics (defaults to `boogie=info` to keep logs clean and private).
+> **Tip:** Runtime diagnostics are automatically saved to `boogie.log` alongside `api_keys.json`. Set `RUST_LOG=boogie=debug` for verbose trace logging (defaults to `boogie=info`).
 
 ---
 
@@ -177,8 +178,12 @@ Or configure manually by copying `config/api_keys.example.json` to `target/relea
 
 ```text
 .
+├── .github/workflows/
+│   ├── ci.yml                  # Formatting, Clippy & unit test CI on Windows
+│   └── release.yml             # Automated Windows release build on v* tags
 ├── Cargo.toml                  # Dependencies & binary target
 ├── Cargo.lock                  # Reproducible dependency lockfile
+├── LICENSE                     # MIT License
 ├── build.rs                    # Embeds Windows .exe icon (assets/logo.ico)
 ├── assets/
 │   ├── logo.png                # Brand logo
@@ -186,6 +191,7 @@ Or configure manually by copying `config/api_keys.example.json` to `target/relea
 │   ├── logo.ico                # Multi-res Windows executable icon
 │   ├── boogie.rc               # Windows icon resource definition
 │   ├── screenshot.png          # UI showcase screenshot
+│   ├── social_preview.png      # Open Graph / GitHub Social Preview banner (1280x640)
 │   ├── perf_comparison.svg     # Vector performance comparison chart
 │   └── latency_comparison.svg  # Vector voice latency comparison chart
 ├── core/
@@ -234,3 +240,9 @@ GitHub Actions (`.github/workflows/ci.yml`) runs formatting, strict Clippy (`-D 
 | **Windows Automation** | `windows` (`windows-rs`, Per-Monitor V2 DPI-aware), `screenshots`, `arboard`, `trash` |
 | **Browser Control** | `chromiumoxide` (CDP, sandboxed), `reqwest`, `scraper` |
 | **Security & Dashboard** | `ring` (random token auth), `url` (SSRF guard), `axum` |
+
+---
+
+## License
+
+Licensed under the [MIT License](LICENSE).
