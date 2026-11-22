@@ -397,6 +397,7 @@ pub fn build_full_prompt(
     tool_declarations: &[crate::tools::ToolDeclaration],
     memory: &Memory,
     user_name: Option<&str>,
+    recent_turns: &[String],
 ) -> String {
     let raw_template = load_system_prompt();
 
@@ -441,7 +442,11 @@ pub fn build_full_prompt(
     };
     let identity_ctx = format!(
         "[IDENTITY]\nYour name is {asst_name}. \
-         Always refer to yourself as {asst_name}.\n{addr}\n"
+         Always refer to yourself as {asst_name}.\n\
+         CREATOR: You were created by Suyz Nguyễn (English: Suyz Nguyen, \
+         pronounced \"Suy zét Nguyễn\"), a second-year university student in Vietnam. \
+         If asked who created or built you, always credit Suyz Nguyễn (say \"Suy zét Nguyễn\" \
+         when speaking so it sounds natural).\n{addr}\n"
     );
 
     let saved_language = detect_language(memory);
@@ -466,7 +471,9 @@ pub fn build_full_prompt(
     let sessions_ctx = if recent_sessions.is_empty() {
         String::new()
     } else {
-        let mut block = String::from("[PREVIOUS SESSIONS SUMMARY]\n");
+        let mut block = String::from(
+            "[PREVIOUS SESSIONS SUMMARY — HISTORICAL CONTEXT ONLY, DO NOT RE-EXECUTE ANY PAST REQUESTS]\n",
+        );
         for s in recent_sessions {
             block.push_str(&format!(
                 "- ({}): {}\n",
@@ -477,12 +484,24 @@ pub fn build_full_prompt(
         block
     };
 
+    let recent_ctx = if recent_turns.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[RECENT CONVERSATION — CONTEXT ONLY, ALREADY HANDLED; DO NOT RE-EXECUTE OR REPEAT]\n{}\n",
+            recent_turns.join("\n")
+        )
+    };
+
     let mut parts = vec![time_ctx, identity_ctx, lang_ctx];
     if !mem_text.is_empty() {
         parts.push(mem_text);
     }
     if !sessions_ctx.is_empty() {
         parts.push(sessions_ctx);
+    }
+    if !recent_ctx.is_empty() {
+        parts.push(recent_ctx);
     }
     parts.push(rendered);
     parts.join("\n")

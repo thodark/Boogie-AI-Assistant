@@ -6,6 +6,7 @@ mod flight_finder;
 mod game_updater;
 mod inline;
 mod media;
+pub mod open_app;
 mod reminder;
 mod screen;
 mod send_message;
@@ -26,6 +27,7 @@ pub fn register_all(registry: &mut ToolRegistry, event_tx: broadcast::Sender<App
     computer_control::register(registry);
     files::register(registry);
     inline::register(registry, event_tx.clone());
+    open_app::register(registry);
     reminder::register(registry);
     system::register(registry);
     web::register(registry);

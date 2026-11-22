@@ -1,10 +1,10 @@
 use std::time::Instant;
 
-const SPEECH_THRESHOLD: f32 = 0.025;
+const SPEECH_THRESHOLD: f32 = 0.018;
 const BARGE_IN_RATIO: f32 = 1.45;
 const SPEAKER_TAIL_SECS: f64 = 0.40;
-const SPEECH_HANGOVER_SECS: f64 = 0.40;
-const STREAM_END_SILENCE_SECS: f64 = 1.05;
+const SPEECH_HANGOVER_SECS: f64 = 0.45;
+const STREAM_END_SILENCE_SECS: f64 = 0.75;
 
 pub struct EchoGuard {
     recent_output_level: f32,
@@ -137,19 +137,19 @@ mod tests {
             eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(200)),
             MicDecision::SendAudio
         );
-        // 600ms silence: suppressed, not yet streamEnd
+        // 550ms silence: suppressed, not yet streamEnd
         assert_eq!(
-            eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(600)),
+            eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(550)),
             MicDecision::Suppress
         );
-        // 1100ms silence: emits SendStreamEnd once
+        // 800ms silence: emits SendStreamEnd once
         assert_eq!(
-            eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(1100)),
+            eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(800)),
             MicDecision::SendStreamEnd
         );
         // Subsequent silence does not spam SendStreamEnd
         assert_eq!(
-            eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(1400)),
+            eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(1100)),
             MicDecision::Suppress
         );
     }

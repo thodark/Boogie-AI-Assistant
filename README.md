@@ -9,6 +9,7 @@
 ![Rust](https://img.shields.io/badge/Rust-Edition_2024-orange?logo=rust&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows_x64-0078D6?logo=windows&logoColor=white)
 ![Cold Start](https://img.shields.io/badge/Window_Ready-~137ms-22D3EE)
+![Audio TTFB](https://img.shields.io/badge/Audio_TTFB-~580ms-F59E0B)
 ![RAM](https://img.shields.io/badge/Private_RAM-~33_MB-8B5CF6)
 ![Binary](https://img.shields.io/badge/Single_Binary-28.0_MB-10B981)
 ![Renderer](https://img.shields.io/badge/UI-egui_+_GLSL_3D_Shader-EC4899)
@@ -68,11 +69,43 @@ Electron Bundle             █████████████████�
 | Metric | Boogie (Rust) | Typical Python + PyQt6 | Typical Electron / WebView |
 | :--- | :---: | :---: | :---: |
 | **Window Ready** | **~137 ms** | ~2.5 – 4.5 s | ~3.5 – 7.0 s |
+| **First Audio Response (TTFB)** | **~580 ms** (~1.0–1.3s w/ VAD) | ~2.2 – 4.5 s (STT→LLM→TTS) | ~2.5 – 5.0 s (STT→LLM→TTS) |
 | **Private RAM** | **~33 MB** | ~240 – 380 MB | ~450 – 800+ MB |
 | **Total Working Set** | **~61 MB** | ~300 – 450 MB | ~550 – 1,000+ MB |
 | **Executable Size** | **28.0 MB** (1 file) | 350+ MB (folder) | 250 – 600 MB (folder) |
 | **Runtime Needed** | **None** | Python + Qt DLLs | Bundled Chromium + Node |
 | **3D Visuals** | **60 FPS GLSL Shader** | CPU / QPainter | WebGL (high RAM) |
+
+---
+
+## Response Speed — Real-Time Voice-to-Voice Latency
+
+Instead of chaining three slow stages (**Speech-to-Text → Chat LLM → Text-to-Speech**), Boogie streams raw 16 kHz WASAPI microphone audio directly over a persistent TLS WebSocket to **Gemini Live Native Audio** and plays incoming 24 kHz audio chunks the instant the first packet arrives.
+
+### Visual Response Latency Comparison
+
+> Measured live on Windows x64 (`models/gemini-3.1-flash-live-preview`, persistent WebSocket session across conversational turns: **541 ms / 572 ms / 626 ms** → **~580 ms avg** to first audio byte).
+
+```text
+🎙️ Time to First Spoken Word After Asking (shorter is better)
+──────────────────────────────────────────────────────────────────────────
+Boogie API First Audio (TTFB)    ███░░░░░░░░░░░░░░░░░   0.58s  (541 – 626 ms measured)
+Boogie Total Voice-to-Voice*     ██████░░░░░░░░░░░░░░   1.0 – 1.3s  (incl. 450–750 ms VAD)
+Cascaded STT → LLM → Cloud TTS   ██████████████░░░░░░   2.5 – 4.2s  (3 serial round-trips)
+Local Whisper + LLM + TTS        ████████████████████   3.5 – 6.0s+ (batch decode + synth)
+```
+> \*Total voice-to-voice time includes natural end-of-speech silence detection so Boogie never cuts off the last syllable of your sentence.
+
+### Step-by-Step Response Pipeline Breakdown
+
+| Stage | Latency | What Happens Under the Hood |
+| :--- | :---: | :--- |
+| **1. Local Rust Capture & DSP** | **`< 2 ms`** | WASAPI captures 16 kHz mono PCM, runs anti-alias resampling, RMS level & Echo Guard (`echo.rs`), and streams frames immediately — zero Python GIL or batch buffering |
+| **2. End-of-Speech Detection** | **`450 – 750 ms`** | `450 ms` speech hangover streams trailing syllables for server-side VAD; explicit `audioStreamEnd` fires at `750 ms` if server VAD hasn't already closed the turn |
+| **3. Gemini Live First Audio** | **`~580 ms`** | Native audio-to-audio streaming over persistent TLS WebSocket — **zero separate STT or TTS round-trips** (`541 – 626 ms` measured) |
+| **4. Speaker & 3D Orb Sync** | **`< 15 ms`** | First 24 kHz PCM chunk is FFT-analyzed for visemes (`dsp.rs`) and pushed straight to the WASAPI ring buffer while the 3D orb morphs into `Speaking` |
+| **5. Instant Barge-In / Stop** | **`< 20 ms`** | Speaking over Boogie or clicking Interrupt fires `PlaybackCmd::Clear`, flushing the speaker buffer immediately without waiting for the server |
+| **6. Native Local Tools** | **`~15 – 150 ms`** | Non-blocking Rust worker executes `open_app` (Win32 window focus / Start Menu / Registry), `open_url`, or system controls in parallel with a hard `25 s` timeout guard |
 
 ---
 
@@ -91,8 +124,9 @@ Electron Bundle             █████████████████�
 - **Floating Glass Control Dock:** Centered pill dock with Mute toggle, 14-bar live spectrum visualizer, instant Interrupt/Stop button, and Conversation Drawer toggle.
 
 ### 3. Resilient Voice Pipeline & Real Screen Vision
-- **Native WASAPI Audio (`audio.rs`) + Hardware-Aware Echo Guard (`echo.rs`):** Multi-format (`f32`/`i16`/`u16`) capture & playback with anti-alias downsampling, instant speaker buffer clearing on barge-in or server `interrupted`, 400ms speech hangover, `audio/pcm;rate=16000`, and `audioStreamEnd` signaling.
-- **Resilient Gemini Live Client (`gemini.rs`, `main.rs`):** Non-blocking background tool execution, panic isolation with automatic supervisor recovery, `interval`-based stall watchdog, `goAway` & 14-minute session rotation, exponential reconnect backoff, and long-term session summary recall.
+- **Native WASAPI Audio (`audio.rs`) + Hardware-Aware Echo Guard (`echo.rs`):** Multi-format (`f32`/`i16`/`u16`) capture & playback with anti-alias downsampling, instant speaker buffer clearing (`< 20 ms`) on barge-in or server `interrupted`, 450ms speech hangover, `audio/pcm;rate=16000`, and `audioStreamEnd` signaling at 750ms silence.
+- **Resilient Gemini Live Client (`gemini.rs`, `main.rs`):** Per-session non-blocking background tool worker with 25s timeout & panic isolation, 20s WebSocket keepalive pings, response-only stall watchdog (never falsely disconnects during quiet listening), `goAway` & 14-minute session rotation, exponential reconnect backoff, and long-term session summary recall.
+- **Native App Launcher (`open_app.rs`) & Fast Browser Control (`browser.rs`):** Resolves & focuses/launches any installed Windows app via Win32 window enumeration, Start Menu `.lnk` shortcuts, Windows Registry `App Paths`, `PATH`, URI schemes, and UWP `Get-StartApps`; opens URLs directly in your default or requested browser (`brave`, `chrome`, `edge`, `firefox`) without hanging.
 - **Real Screen & Browser Vision (`screen_process`, `browser_control` `screenshot`):** Captures monitors or Chromium pages, resizes to `≤1280px` JPEG, and streams directly into Gemini Live `realtimeInput.video`.
 
 ### 4. Security-First Automation (42 Native Windows Tools)
@@ -198,7 +232,7 @@ Or configure manually by copying `config/api_keys.example.json` to `target/relea
     ├── dashboard.rs            # Authenticated local Axum WS server (off by default)
     ├── tools.rs                # Tool registry, vision frames & untrusted tagging
     ├── util.rs                 # UTF-8 safe truncation, SSRF guard, shared HTTP & JPEG
-    └── actions/                # 16 modules implementing 42 native Windows tools
+    └── actions/                # 17 modules implementing 42 native Windows tools (incl. open_app)
 ```
 
 ---

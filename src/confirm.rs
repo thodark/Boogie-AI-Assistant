@@ -285,7 +285,7 @@ pub fn evaluate_tool_call(
         }
 
         // Prompt-injection elevation for medium-risk desktop interaction tools
-        "click_screen" | "type_text" | "press_key" | "copy_file" | "open_application"
+        "click_screen" | "type_text" | "press_key" | "copy_file" | "open_app"
             if saw_untrusted_in_turn =>
         {
             let args_str = args.to_string();

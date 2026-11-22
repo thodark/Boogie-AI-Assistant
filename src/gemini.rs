@@ -373,6 +373,13 @@ impl LiveSession {
         self.send_json(&msg).await
     }
 
+    pub async fn send_ping(&mut self) -> Result<(), String> {
+        self.ws_tx
+            .send(Message::Ping(Vec::new().into()))
+            .await
+            .map_err(|e| format!("ws ping: {e}"))
+    }
+
     async fn send_json(&mut self, value: &Value) -> Result<(), String> {
         let text = serde_json::to_string(value).map_err(|e| format!("json encode: {e}"))?;
         self.ws_tx

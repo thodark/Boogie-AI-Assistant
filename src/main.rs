@@ -25,7 +25,9 @@ use crate::util::truncate_chars;
 
 pub const SEND_SAMPLE_RATE: u32 = 16_000;
 pub const RECV_SAMPLE_RATE: u32 = 24_000;
-const STALL_LIMIT_SECS: f64 = 45.0;
+const RESPONSE_STALL_SECS: f64 = 35.0;
+const WS_PING_INTERVAL_SECS: u64 = 20;
+const TOOL_EXEC_TIMEOUT_SECS: u64 = 25;
 const MONITOR_CHECK_INTERVAL_SECS: u64 = 60;
 const MAX_SESSION_AGE_SECS: u64 = 14 * 60; // Proactive clean refresh before 15m audio limit
 
@@ -323,118 +325,6 @@ async fn run_session(
     let tools_vec: Vec<serde_json::Value> = serde_json::from_value(tool_json).unwrap_or_default();
 
     let mut backoff_secs: u64 = 2;
-
-    // Dedicated non-blocking tool worker so select! NEVER freezes during slow tools or 90s confirm modals
-    let (tool_job_tx, mut tool_job_rx) = mpsc::channel::<(Vec<gemini::FunctionCall>, bool)>(16);
-    let (tool_done_tx, mut tool_done_rx) = mpsc::channel::<ToolBatchOutcome>(16);
-
-    {
-        let tools_worker = tools.clone();
-        let event_tx_worker = event_tx.clone();
-        let confirm_rx_worker = confirm_rx.clone();
-        tokio::spawn(async move {
-            while let Some((calls, mut saw_untrusted)) = tool_job_rx.recv().await {
-                let mut responses = Vec::new();
-                let mut vision_frames = Vec::new();
-
-                for call in calls {
-                    let args_str = call.args.to_string();
-                    let args_preview = truncate_chars(&args_str, 160);
-                    let _ = event_tx_worker.send(AppEvent::Log(format!(
-                        "tool: {} {}",
-                        call.name, args_preview
-                    )));
-
-                    let decision =
-                        confirm::evaluate_tool_call(&call.name, &call.args, saw_untrusted);
-
-                    let result = match decision {
-                        PermissionDecision::Deny(reason) => {
-                            confirm::write_audit_log(&call.name, "DENIED_POLICY", &reason);
-                            tools::ToolResult::err(reason)
-                        }
-                        PermissionDecision::RequireConfirm { title, detail } => {
-                            let req_id = confirm::next_request_id();
-                            {
-                                // Drain any stale confirmation responses before asking
-                                let mut rx = confirm_rx_worker.lock().await;
-                                while rx.try_recv().is_ok() {}
-                            }
-                            let _ = event_tx_worker.send(AppEvent::ConfirmRequest {
-                                request_id: req_id,
-                                title: title.clone(),
-                                detail: detail.clone(),
-                            });
-                            let _ = event_tx_worker
-                                .send(AppEvent::Log(format!("Waiting for confirmation: {title}")));
-
-                            let confirmed =
-                                await_matching_confirm(&confirm_rx_worker, req_id).await;
-                            match confirmed {
-                                Some(true) => {
-                                    confirm::write_audit_log(&call.name, "APPROVED", &detail);
-                                    let _ = event_tx_worker
-                                        .send(AppEvent::Log("Confirmed".to_string()));
-                                    execute_tool_isolated(&tools_worker, &call.name, call.args)
-                                        .await
-                                }
-                                Some(false) => {
-                                    confirm::write_audit_log(&call.name, "DENIED_USER", &detail);
-                                    let _ = event_tx_worker
-                                        .send(AppEvent::Log("Denied by user".to_string()));
-                                    tools::ToolResult::err("User denied this action.")
-                                }
-                                None => {
-                                    confirm::write_audit_log(&call.name, "TIMEOUT", &detail);
-                                    let _ = event_tx_worker
-                                        .send(AppEvent::Log("Confirmation timed out".to_string()));
-                                    tools::ToolResult::err(
-                                        "Confirmation timed out (90s). Action cancelled.",
-                                    )
-                                }
-                            }
-                        }
-                        PermissionDecision::Allow => {
-                            execute_tool_isolated(&tools_worker, &call.name, call.args).await
-                        }
-                    };
-
-                    if result.is_untrusted() {
-                        saw_untrusted = true;
-                    }
-                    if let Some(jpeg) = result.image_jpeg.clone() {
-                        vision_frames.push(jpeg);
-                    }
-
-                    let formatted = result.formatted_for_model();
-                    let output = if result.is_error {
-                        serde_json::json!({"error": formatted})
-                    } else {
-                        serde_json::json!({"result": formatted})
-                    };
-
-                    responses.push(gemini::FunctionResponse {
-                        id: call.id,
-                        name: call.name,
-                        response: output,
-                    });
-                }
-
-                if tool_done_tx
-                    .send(ToolBatchOutcome {
-                        responses,
-                        vision_frames,
-                        saw_untrusted,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-    }
-
     let mut internal_rx = event_tx.subscribe();
     let (monitor_tx, mut monitor_rx) = mpsc::channel::<Vec<String>>(4);
 
@@ -445,26 +335,30 @@ async fn run_session(
         };
         let used_resume = resume_handle.is_some();
 
-        let memory = config::load_memory();
-        let system_prompt = config::build_full_prompt(
-            &cfg,
-            tools.declarations(),
-            &memory,
-            cfg.user_name.as_deref(),
-        );
-
         let recent_log: Vec<String> = {
             let s = shared.lock().await;
             s.session_log
                 .iter()
                 .rev()
-                .take(30)
+                .take(20)
                 .cloned()
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
                 .collect()
         };
+
+        let memory = config::load_memory();
+        // Inject recent context inside system_instruction (never as a turnComplete:true user turn,
+        // which would cause Gemini to re-execute old requests like opening URLs on reconnect!)
+        let ctx_for_prompt: &[String] = if used_resume { &[] } else { &recent_log };
+        let system_prompt = config::build_full_prompt(
+            &cfg,
+            tools.declarations(),
+            &memory,
+            cfg.user_name.as_deref(),
+            ctx_for_prompt,
+        );
 
         let live_config = gemini::LiveConfig {
             api_key: cfg.api_key().to_string(),
@@ -505,15 +399,121 @@ async fn run_session(
             continue;
         }
 
-        if !used_resume && !recent_log.is_empty() {
-            let context = format!(
-                "[CONVERSATION CONTEXT — this is what was said recently, use it to maintain continuity]\n{}",
-                recent_log.join("\n")
-            );
-            if let Err(e) = session.send_text(&context).await {
-                tracing::warn!("failed to inject context: {e}");
-            }
-        }
+        // Per-session isolated tool worker — aborted cleanly on disconnect so stale tool calls
+        // can NEVER leak into a reconnected session.
+        let (tool_job_tx, mut tool_job_rx) = mpsc::channel::<(Vec<gemini::FunctionCall>, bool)>(16);
+        let (tool_done_tx, mut tool_done_rx) = mpsc::channel::<ToolBatchOutcome>(16);
+        let tool_worker_handle = {
+            let tools_worker = tools.clone();
+            let event_tx_worker = event_tx.clone();
+            let confirm_rx_worker = confirm_rx.clone();
+            tokio::spawn(async move {
+                while let Some((calls, mut saw_untrusted)) = tool_job_rx.recv().await {
+                    let mut responses = Vec::new();
+                    let mut vision_frames = Vec::new();
+
+                    for call in calls {
+                        let args_str = call.args.to_string();
+                        let args_preview = truncate_chars(&args_str, 160);
+                        let _ = event_tx_worker.send(AppEvent::Log(format!(
+                            "tool: {} {}",
+                            call.name, args_preview
+                        )));
+
+                        let decision =
+                            confirm::evaluate_tool_call(&call.name, &call.args, saw_untrusted);
+
+                        let result = match decision {
+                            PermissionDecision::Deny(reason) => {
+                                confirm::write_audit_log(&call.name, "DENIED_POLICY", &reason);
+                                tools::ToolResult::err(reason)
+                            }
+                            PermissionDecision::RequireConfirm { title, detail } => {
+                                let req_id = confirm::next_request_id();
+                                {
+                                    let mut rx = confirm_rx_worker.lock().await;
+                                    while rx.try_recv().is_ok() {}
+                                }
+                                let _ = event_tx_worker.send(AppEvent::ConfirmRequest {
+                                    request_id: req_id,
+                                    title: title.clone(),
+                                    detail: detail.clone(),
+                                });
+                                let _ = event_tx_worker.send(AppEvent::Log(format!(
+                                    "Waiting for confirmation: {title}"
+                                )));
+
+                                let confirmed =
+                                    await_matching_confirm(&confirm_rx_worker, req_id).await;
+                                match confirmed {
+                                    Some(true) => {
+                                        confirm::write_audit_log(&call.name, "APPROVED", &detail);
+                                        let _ = event_tx_worker
+                                            .send(AppEvent::Log("Confirmed".to_string()));
+                                        execute_tool_isolated(&tools_worker, &call.name, call.args)
+                                            .await
+                                    }
+                                    Some(false) => {
+                                        confirm::write_audit_log(
+                                            &call.name,
+                                            "DENIED_USER",
+                                            &detail,
+                                        );
+                                        let _ = event_tx_worker
+                                            .send(AppEvent::Log("Denied by user".to_string()));
+                                        tools::ToolResult::err("User denied this action.")
+                                    }
+                                    None => {
+                                        confirm::write_audit_log(&call.name, "TIMEOUT", &detail);
+                                        let _ = event_tx_worker.send(AppEvent::Log(
+                                            "Confirmation timed out".to_string(),
+                                        ));
+                                        tools::ToolResult::err(
+                                            "Confirmation timed out (90s). Action cancelled.",
+                                        )
+                                    }
+                                }
+                            }
+                            PermissionDecision::Allow => {
+                                execute_tool_isolated(&tools_worker, &call.name, call.args).await
+                            }
+                        };
+
+                        if result.is_untrusted() {
+                            saw_untrusted = true;
+                        }
+                        if let Some(jpeg) = result.image_jpeg.clone() {
+                            vision_frames.push(jpeg);
+                        }
+
+                        let formatted = result.formatted_for_model();
+                        let output = if result.is_error {
+                            serde_json::json!({"error": formatted})
+                        } else {
+                            serde_json::json!({"result": formatted})
+                        };
+
+                        responses.push(gemini::FunctionResponse {
+                            id: call.id,
+                            name: call.name,
+                            response: output,
+                        });
+                    }
+
+                    if tool_done_tx
+                        .send(ToolBatchOutcome {
+                            responses,
+                            vision_frames,
+                            saw_untrusted,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        };
 
         let _ = event_tx.send(AppEvent::BannerError(None));
         let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
@@ -521,13 +521,15 @@ async fn run_session(
 
         let mut echo_guard = echo::EchoGuard::new();
         let session_started = Instant::now();
-        let mut last_activity = Instant::now();
+        let mut last_ping = Instant::now();
+        let mut awaiting_response_since: Option<Instant> = None;
+        let mut response_timer: Option<Instant> = None;
         let mut last_monitor_check = Instant::now();
         let mut proactive = proactive::ProactiveEngine::new(cfg.proactive_audio());
         let mut saw_untrusted_in_turn = false;
         let mut should_shutdown = false;
 
-        // Fixed Bug #2: interval created OUTSIDE the select! loop so watchdog/monitors/proactive actually run
+        // Interval created OUTSIDE select! so keepalive ping, stall detection, monitors & proactive always tick
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -572,13 +574,15 @@ async fn run_session(
                                 tracing::error!("send audio: {e}");
                                 break;
                             }
-                            last_activity = Instant::now();
                             shared.lock().await.last_user_speech = Instant::now();
                         }
                         MicDecision::SendStreamEnd => {
                             if let Err(e) = session.send_audio_stream_end().await {
                                 tracing::warn!("send audioStreamEnd: {e}");
                             }
+                            let now = Instant::now();
+                            awaiting_response_since.get_or_insert(now);
+                            response_timer.get_or_insert(now);
                         }
                         MicDecision::Suppress => {}
                     }
@@ -593,7 +597,6 @@ async fn run_session(
                         break;
                     };
 
-                    last_activity = Instant::now();
                     match event {
                         gemini::GeminiEvent::SetupComplete => {
                             backoff_secs = 2;
@@ -601,6 +604,13 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::Audio(data) => {
+                            awaiting_response_since = None;
+                            if let Some(t0) = response_timer.take() {
+                                tracing::info!(
+                                    "first audio response in {}ms",
+                                    t0.elapsed().as_millis()
+                                );
+                            }
                             let samples: Vec<i16> = data
                                 .as_chunks::<2>()
                                 .0
@@ -621,6 +631,7 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::OutputTranscript(text) => {
+                            awaiting_response_since = None;
                             let _ = event_tx.send(AppEvent::Log(format!("Boogie: {text}")));
                             shared.lock().await.session_log.push(format!("assistant: {text}"));
                         }
@@ -632,6 +643,8 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::Interrupted => {
+                            awaiting_response_since = None;
+                            response_timer = None;
                             tracing::info!("server interrupted playback — clearing speaker buffer");
                             let _ = playback_tx.send(PlaybackCmd::Clear).await;
                             echo_guard.reset();
@@ -640,12 +653,21 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::TurnComplete => {
+                            awaiting_response_since = None;
+                            response_timer = None;
                             saw_untrusted_in_turn = false;
                             shared.lock().await.is_speaking = false;
                             let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
                         }
 
                         gemini::GeminiEvent::ToolCall(calls) => {
+                            awaiting_response_since = None;
+                            if let Some(t0) = response_timer.take() {
+                                tracing::info!(
+                                    "tool call dispatched in {}ms",
+                                    t0.elapsed().as_millis()
+                                );
+                            }
                             let _ = event_tx.send(AppEvent::StateChange(AppState::Thinking));
                             if tool_job_tx.send((calls, saw_untrusted_in_turn)).await.is_err() {
                                 tracing::error!("tool worker channel closed");
@@ -699,13 +721,17 @@ async fn run_session(
                         tracing::error!("send tool response: {e}");
                         break;
                     }
-                    last_activity = Instant::now();
+                    let now = Instant::now();
+                    awaiting_response_since = Some(now);
+                    response_timer = Some(now);
                 }
 
                 Some(()) = int_guard.recv() => {
                     tracing::info!("user interrupt — clearing speaker buffer");
                     let _ = playback_tx.send(PlaybackCmd::Clear).await;
                     echo_guard.reset();
+                    awaiting_response_since = None;
+                    response_timer = None;
                     shared.lock().await.is_speaking = false;
                     let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
                     let _ = event_tx.send(AppEvent::Log("interrupted".to_string()));
@@ -718,7 +744,6 @@ async fn run_session(
                         if let Err(e) = session.send_text(&wrapped).await {
                             tracing::error!("monitor alert send: {e}");
                         }
-                        last_activity = Instant::now();
                     }
                 }
 
@@ -729,7 +754,6 @@ async fn run_session(
                             if let Err(e) = session.send_text(&prompt).await {
                                 tracing::error!("timer alert send: {e}");
                             }
-                            last_activity = Instant::now();
                         }
                         AppEvent::Shutdown => {
                             should_shutdown = true;
@@ -740,9 +764,21 @@ async fn run_session(
                 }
 
                 _ = tick.tick() => {
-                    if last_activity.elapsed().as_secs_f64() > STALL_LIMIT_SECS {
-                        tracing::warn!("stall watchdog triggered after {STALL_LIMIT_SECS}s — reconnecting");
-                        let _ = event_tx.send(AppEvent::Log("stall watchdog: reconnecting".to_string()));
+                    // Keep WebSocket alive during quiet periods and detect dead TCP sockets
+                    if last_ping.elapsed().as_secs() >= WS_PING_INTERVAL_SECS {
+                        last_ping = Instant::now();
+                        if let Err(e) = session.send_ping().await {
+                            tracing::warn!("ws keepalive ping failed ({e}) — reconnecting");
+                            break;
+                        }
+                    }
+
+                    // Only trigger stall reconnect if we sent a turn/toolResponse and got zero reply
+                    if let Some(since) = awaiting_response_since
+                        && since.elapsed().as_secs_f64() > RESPONSE_STALL_SECS
+                    {
+                        tracing::warn!("response stall after {RESPONSE_STALL_SECS}s — reconnecting");
+                        let _ = event_tx.send(AppEvent::Log("connection stalled: reconnecting".to_string()));
                         break;
                     }
 
@@ -783,12 +819,13 @@ async fn run_session(
                         if let Err(e) = session.send_text(&prompt).await {
                             tracing::error!("proactive send: {e}");
                         }
-                        last_activity = Instant::now();
                     }
                 }
             }
         }
 
+        // Cancel per-session tool worker cleanly so stale jobs never leak across reconnects
+        tool_worker_handle.abort();
         drop(mic_guard);
         drop(int_guard);
 
@@ -827,9 +864,25 @@ async fn execute_tool_isolated(
 ) -> tools::ToolResult {
     let t = Arc::clone(tools);
     let tool_name = name.to_string();
-    tokio::spawn(async move { t.execute(&tool_name, args).await })
-        .await
-        .unwrap_or_else(|e| tools::ToolResult::err(format!("tool panicked: {e}")))
+    let started = Instant::now();
+    let handle = tokio::spawn(async move { t.execute(&tool_name, args).await });
+
+    let result =
+        match tokio::time::timeout(Duration::from_secs(TOOL_EXEC_TIMEOUT_SECS), handle).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => tools::ToolResult::err(format!("tool panicked: {e}")),
+            Err(_) => tools::ToolResult::err(format!(
+                "tool '{name}' timed out after {TOOL_EXEC_TIMEOUT_SECS}s"
+            )),
+        };
+
+    tracing::info!(
+        "tool '{}' finished in {}ms (ok={})",
+        name,
+        started.elapsed().as_millis(),
+        !result.is_error
+    );
+    result
 }
 
 async fn await_matching_confirm(

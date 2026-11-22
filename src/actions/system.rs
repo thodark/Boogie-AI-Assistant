@@ -1,6 +1,6 @@
 use crate::confirm::is_protected_process_name;
 use crate::tools::{ToolRegistry, ToolResult};
-use crate::util::{is_blocked_executable, truncate_chars};
+use crate::util::truncate_chars;
 use serde_json::Value;
 
 use super::{param, tool};
@@ -12,7 +12,10 @@ pub fn register(registry: &mut ToolRegistry) {
             "Execute a shell command and return UTF-8 output. Read-only commands run immediately; mutating commands require user confirmation.",
             vec![
                 ("command", param("command", "string", "Command to execute")),
-                ("timeout", param("timeout", "integer", "Timeout in seconds (default 30)")),
+                (
+                    "timeout",
+                    param("timeout", "integer", "Timeout in seconds (default 30)"),
+                ),
             ],
             vec!["command"],
         ),
@@ -37,22 +40,15 @@ pub fn register(registry: &mut ToolRegistry) {
             "kill_process",
             "Terminate a process by exact name (e.g. notepad.exe) or integer PID (requires user confirmation; protected system processes cannot be killed).",
             vec![
-                ("name", param("name", "string", "Exact process name (case-insensitive)")),
+                (
+                    "name",
+                    param("name", "string", "Exact process name (case-insensitive)"),
+                ),
                 ("pid", param("pid", "integer", "Process ID")),
             ],
             vec![],
         ),
         Box::new(|args| Box::pin(kill_process(args))),
-    );
-
-    registry.register(
-        tool(
-            "open_application",
-            "Open a desktop application by name (e.g. notepad, calc, spotify, code).",
-            vec![("name", param("name", "string", "Application name"))],
-            vec!["name"],
-        ),
-        Box::new(|args| Box::pin(open_application(args))),
     );
 }
 
@@ -206,25 +202,4 @@ async fn kill_process(args: Value) -> ToolResult {
     })
     .await
     .unwrap_or_else(|e| ToolResult::err(format!("kill_process task failed: {e}")))
-}
-
-async fn open_application(args: Value) -> ToolResult {
-    let name = args
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .trim();
-    if name.is_empty() {
-        return ToolResult::err("No application name specified.");
-    }
-    if is_blocked_executable(name) {
-        return ToolResult::err(format!(
-            "Blocked opening script/executable file directly via open_application: '{name}'. \
-             Pass an app name or use run_command with confirmation."
-        ));
-    }
-    match open::that(name) {
-        Ok(_) => ToolResult::ok(format!("Opened {name}")),
-        Err(e) => ToolResult::err(format!("Failed to open {name}: {e}")),
-    }
 }
