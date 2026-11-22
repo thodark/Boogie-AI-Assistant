@@ -7,6 +7,8 @@ use tokio::sync::mpsc;
 
 use crate::{RECV_SAMPLE_RATE, SEND_SAMPLE_RATE};
 
+const MAX_SPEAKER_BUFFER_SECS: usize = 180;
+
 pub enum PlaybackCmd {
     Audio(Vec<u8>),
     Clear,
@@ -208,12 +210,12 @@ pub fn open_speaker(
     let native_channels = (default_cfg.channels() as usize).max(1);
     let sample_format = default_cfg.sample_format();
 
-    // Cap speaker buffer to ~12 seconds of audio to prevent unbounded backlog
-    let max_buf_samples = (native_rate as usize) * native_channels * 12;
+    // Cap speaker buffer to 180s of mono frames (Gemini streams 3-6x faster than real-time)
+    let max_buf_frames = (native_rate as usize) * MAX_SPEAKER_BUFFER_SECS;
+    let shrink_threshold = (native_rate as usize) * 8;
+    let idle_capacity = (native_rate as usize) * 2;
 
-    let buffer = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(
-        native_rate as usize * native_channels,
-    )));
+    let buffer = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(idle_capacity)));
     queued_samples.store(0, Ordering::Release);
 
     let buf_write = Arc::clone(&buffer);
@@ -225,6 +227,9 @@ pub fn open_speaker(
                 PlaybackCmd::Clear => {
                     if let Ok(mut buf) = buf_write.lock() {
                         buf.clear();
+                        if buf.capacity() > shrink_threshold {
+                            buf.shrink_to(idle_capacity);
+                        }
                         queued_write.store(0, Ordering::Release);
                     }
                 }
@@ -246,17 +251,20 @@ pub fn open_speaker(
                     };
 
                     if let Ok(mut buf) = buf_write.lock() {
-                        let incoming = resampled.len() * native_channels;
-                        if buf.len() + incoming > max_buf_samples {
-                            let overflow = (buf.len() + incoming).saturating_sub(max_buf_samples);
+                        if buf.is_empty() && buf.capacity() > shrink_threshold {
+                            buf.shrink_to(idle_capacity);
+                        }
+                        let incoming = resampled.len();
+                        if buf.len() + incoming > max_buf_frames {
+                            let overflow = (buf.len() + incoming).saturating_sub(max_buf_frames);
                             let drop_n = overflow.min(buf.len());
                             buf.drain(..drop_n);
+                            tracing::warn!(
+                                "speaker buffer overflow ({MAX_SPEAKER_BUFFER_SECS}s cap) — dropped {drop_n} oldest frames"
+                            );
                         }
                         for s in &resampled {
-                            let f = *s as f32 / 32768.0;
-                            for _ in 0..native_channels {
-                                buf.push_back(f);
-                            }
+                            buf.push_back(*s as f32 / 32768.0);
                         }
                         queued_write.store(buf.len(), Ordering::Release);
                     }
@@ -275,8 +283,9 @@ pub fn open_speaker(
             &config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 if let Ok(mut buf) = buffer.lock() {
-                    for sample in data.iter_mut() {
-                        *sample = buf.pop_front().unwrap_or(0.0);
+                    for frame in data.chunks_mut(native_channels) {
+                        let sample = buf.pop_front().unwrap_or(0.0);
+                        frame.fill(sample);
                     }
                     queued_read.store(buf.len(), Ordering::Release);
                 } else {
@@ -290,9 +299,10 @@ pub fn open_speaker(
             &config,
             move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                 if let Ok(mut buf) = buffer.lock() {
-                    for sample in data.iter_mut() {
+                    for frame in data.chunks_mut(native_channels) {
                         let f = buf.pop_front().unwrap_or(0.0);
-                        *sample = (f * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                        let sample = (f * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                        frame.fill(sample);
                     }
                     queued_read.store(buf.len(), Ordering::Release);
                 } else {
@@ -306,9 +316,10 @@ pub fn open_speaker(
             &config,
             move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
                 if let Ok(mut buf) = buffer.lock() {
-                    for sample in data.iter_mut() {
+                    for frame in data.chunks_mut(native_channels) {
                         let f = buf.pop_front().unwrap_or(0.0);
-                        *sample = ((f * 32767.0).clamp(-32768.0, 32767.0) as i32 + 32768) as u16;
+                        let sample = ((f * 32767.0).clamp(-32768.0, 32767.0) as i32 + 32768) as u16;
+                        frame.fill(sample);
                     }
                     queued_read.store(buf.len(), Ordering::Release);
                 } else {

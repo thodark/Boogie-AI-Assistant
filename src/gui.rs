@@ -278,52 +278,60 @@ impl BoogieGui {
     }
 
     fn process_events(&mut self) {
-        while let Ok(event) = self.event_rx.try_recv() {
-            match event {
-                AppEvent::StateChange(s) => {
-                    if s != AppState::Speaking {
-                        self.viseme_queue.clear();
-                    }
-                    self.state = s;
-                }
-                AppEvent::AudioLevel(l) => {
-                    self.raw_audio_level = l.clamp(0.0, 1.0);
-                }
-                AppEvent::Visemes(frames, hop_secs, _) => {
-                    if hop_secs > 0.002 {
-                        self.viseme_hop_secs = hop_secs;
-                    }
-                    for frame in frames {
-                        if self.viseme_queue.len() > 250 {
-                            self.viseme_queue.pop_front();
+        loop {
+            match self.event_rx.try_recv() {
+                Ok(event) => match event {
+                    AppEvent::StateChange(s) => {
+                        if s != AppState::Speaking {
+                            self.viseme_queue.clear();
                         }
-                        self.viseme_queue.push_back(frame);
+                        self.state = s;
                     }
-                }
-                AppEvent::ConfirmRequest {
-                    request_id,
-                    title,
-                    detail,
-                } => {
-                    self.confirm_pending = Some(ConfirmDisplay {
+                    AppEvent::AudioLevel(l) => {
+                        self.raw_audio_level = l.clamp(0.0, 1.0);
+                    }
+                    AppEvent::Visemes(frames, hop_secs, _) => {
+                        if hop_secs > 0.002 {
+                            self.viseme_hop_secs = hop_secs;
+                        }
+                        for frame in frames {
+                            if self.viseme_queue.len() > 9000 {
+                                self.viseme_queue.pop_front();
+                            }
+                            self.viseme_queue.push_back(frame);
+                        }
+                    }
+                    AppEvent::ConfirmRequest {
                         request_id,
                         title,
                         detail,
-                    });
-                    self.click_pulse = 0.85;
+                    } => {
+                        self.confirm_pending = Some(ConfirmDisplay {
+                            request_id,
+                            title,
+                            detail,
+                        });
+                        self.click_pulse = 0.85;
+                    }
+                    AppEvent::BannerError(err) => {
+                        self.banner_error = err;
+                    }
+                    AppEvent::TimerAlert(_) => {
+                        self.click_pulse = 1.0;
+                    }
+                    AppEvent::Shutdown => {
+                        self.shutdown_requested = true;
+                    }
+                    AppEvent::Log(msg) => {
+                        self.push_log_message(msg);
+                    }
+                },
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    tracing::warn!("GUI event_rx lagged by {n} events");
                 }
-                AppEvent::BannerError(err) => {
-                    self.banner_error = err;
-                }
-                AppEvent::TimerAlert(_) => {
-                    self.click_pulse = 1.0;
-                }
-                AppEvent::Shutdown => {
-                    self.shutdown_requested = true;
-                }
-                AppEvent::Log(msg) => {
-                    self.push_log_message(msg);
-                }
+                Err(
+                    broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
+                ) => break,
             }
         }
     }
@@ -1085,15 +1093,10 @@ impl BoogieGui {
         );
 
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
-        let mut scroll = egui::ScrollArea::vertical()
+        let scroll = egui::ScrollArea::vertical()
             .id_salt("boogie_transcript_scroll")
             .auto_shrink([false; 2])
             .stick_to_bottom(true);
-
-        if self.scroll_to_bottom {
-            scroll = scroll.scroll_offset(Vec2::new(0.0, f32::MAX));
-            self.scroll_to_bottom = false;
-        }
 
         scroll.show(&mut child, |ui| {
             ui.set_min_width(ui.available_width());
@@ -1130,9 +1133,19 @@ impl BoogieGui {
                                 })
                                 .inner_margin(egui::Margin::symmetric(12, 8))
                                 .show(ui, |ui| {
-                                    ui.set_max_width(max_bubble_w);
-                                    ui.label(
-                                        RichText::new(&entry.body).size(13.0).color(TEXT_BRIGHT),
+                                    ui.with_layout(
+                                        egui::Layout::top_down(egui::Align::LEFT),
+                                        |ui| {
+                                            ui.set_max_width(max_bubble_w);
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&entry.body)
+                                                        .size(13.0)
+                                                        .color(TEXT_BRIGHT),
+                                                )
+                                                .wrap(),
+                                            );
+                                        },
                                     );
                                 });
                         });
@@ -1153,9 +1166,19 @@ impl BoogieGui {
                                 })
                                 .inner_margin(egui::Margin::symmetric(12, 8))
                                 .show(ui, |ui| {
-                                    ui.set_max_width(max_bubble_w);
-                                    ui.label(
-                                        RichText::new(&entry.body).size(13.0).color(TEXT_BRIGHT),
+                                    ui.with_layout(
+                                        egui::Layout::top_down(egui::Align::LEFT),
+                                        |ui| {
+                                            ui.set_max_width(max_bubble_w);
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&entry.body)
+                                                        .size(13.0)
+                                                        .color(TEXT_BRIGHT),
+                                                )
+                                                .wrap(),
+                                            );
+                                        },
                                     );
                                 });
                         });
@@ -1199,6 +1222,14 @@ impl BoogieGui {
                     }
                 }
                 ui.add_space(6.0);
+            }
+
+            if self.scroll_to_bottom {
+                let (_, bottom_rect) = ui.allocate_space(Vec2::new(1.0, 1.0));
+                ui.scroll_to_rect(bottom_rect, Some(egui::Align::BOTTOM));
+                if self.drawer_anim > 0.95 {
+                    self.scroll_to_bottom = false;
+                }
             }
         });
     }

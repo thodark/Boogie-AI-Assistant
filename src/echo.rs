@@ -112,6 +112,13 @@ impl EchoGuard {
         MicDecision::Suppress
     }
 
+    /// Clears pending user-speech hangover once the model begins responding,
+    /// preventing speaker echo leakage or a spurious late `audioStreamEnd` mid-reply.
+    pub fn on_model_response_started(&mut self) {
+        self.stream_active = false;
+        self.last_user_voice = None;
+    }
+
     pub fn reset(&mut self) {
         self.recent_output_level = 0.0;
         self.last_speaker_active = None;
@@ -193,6 +200,22 @@ mod tests {
         );
         assert_eq!(
             eg.evaluate_ptt(false, t0 + Duration::from_millis(250)),
+            MicDecision::Suppress
+        );
+    }
+
+    #[test]
+    fn model_response_started_clears_stale_hangover_and_stream_end() {
+        let mut eg = EchoGuard::new();
+        let t0 = Instant::now();
+        assert_eq!(eg.evaluate_mic(0.2, false, t0), MicDecision::SendAudio);
+        eg.on_model_response_started();
+        assert_eq!(
+            eg.evaluate_mic(0.0, true, t0 + Duration::from_millis(200)),
+            MicDecision::Suppress
+        );
+        assert_eq!(
+            eg.evaluate_mic(0.0, false, t0 + Duration::from_millis(800)),
             MicDecision::Suppress
         );
     }

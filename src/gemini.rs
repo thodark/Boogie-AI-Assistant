@@ -102,7 +102,7 @@ impl LiveSession {
         tracing::info!("WebSocket connected, status={}", resp.status());
 
         let (ws_tx, mut ws_rx) = ws_stream.split();
-        let (event_tx, event_rx) = mpsc::channel(256);
+        let (event_tx, event_rx) = mpsc::channel(1024);
 
         tokio::spawn(async move {
             tracing::debug!("ws reader loop started");

@@ -134,7 +134,7 @@ fn open_audio_devices(
     };
 
     let out_dev = audio::find_output_device(output_name);
-    let (playback_tx, playback_rx) = mpsc::channel::<PlaybackCmd>(200);
+    let (playback_tx, playback_rx) = mpsc::channel::<PlaybackCmd>(1024);
     let speaker_output =
         match audio::open_speaker(out_dev.as_ref(), playback_rx, Arc::clone(speaker_queued)) {
             Ok(s) => {
@@ -305,7 +305,7 @@ fn main() {
         .is_some_and(config::ApiConfig::push_to_talk);
     let shared = Arc::new(Mutex::new(SharedState::new(initial_ptt)));
 
-    let (event_tx, _) = broadcast::channel::<AppEvent>(256);
+    let (event_tx, _) = broadcast::channel::<AppEvent>(4096);
     let (mic_tx, mic_rx) = mpsc::channel::<Vec<u8>>(200);
     let (confirm_tx, confirm_rx) = mpsc::channel::<ConfirmResponse>(8);
     let (interrupt_tx, interrupt_rx) = mpsc::channel::<()>(8);
@@ -793,6 +793,9 @@ async fn run_session(
 
         let mut echo_guard = echo::EchoGuard::new();
         let mut ptt_was_active = false;
+        let mut model_turn_active = false;
+        let mut deferred_refresh = false;
+        let mut last_sent_audio_level: f32 = -1.0;
         let session_started = Instant::now();
         let mut last_ping = Instant::now();
         let mut awaiting_response_since: Option<Instant> = None;
@@ -826,19 +829,35 @@ async fn run_session(
                         .map(|&c| i16::from_le_bytes(c))
                         .collect();
                     let level = dsp::pcm_level(&samples);
-                    let _ = event_tx.send(AppEvent::AudioLevel(
-                        if is_muted || (ptt_mode && !ptt_active) {
-                            0.0
-                        } else {
-                            level
-                        },
-                    ));
+                    let ui_level = if is_muted || (ptt_mode && !ptt_active) {
+                        0.0
+                    } else {
+                        level
+                    };
+                    if ui_level > 0.0 || last_sent_audio_level != 0.0 {
+                        last_sent_audio_level = ui_level;
+                        let _ = event_tx.send(AppEvent::AudioLevel(ui_level));
+                    }
+
+                    let speaker_playing = speaker_queued.load(Ordering::Acquire) > 0;
+                    if !model_turn_active && !speaker_playing {
+                        let finished_speaking = {
+                            let mut s = shared.lock().await;
+                            if s.is_speaking {
+                                s.is_speaking = false;
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if finished_speaking {
+                            let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
+                        }
+                    }
 
                     if is_muted {
                         continue;
                     }
-
-                    let speaker_playing = speaker_queued.load(Ordering::Acquire) > 0;
 
                     if ptt_mode {
                         if ptt_active && !ptt_was_active {
@@ -905,6 +924,10 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::Audio(data) => {
+                            if !model_turn_active {
+                                model_turn_active = true;
+                                echo_guard.on_model_response_started();
+                            }
                             awaiting_response_since = None;
                             if let Some(t0) = response_timer.take() {
                                 tracing::info!(
@@ -944,6 +967,7 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::Interrupted => {
+                            model_turn_active = false;
                             awaiting_response_since = None;
                             response_timer = None;
                             tracing::info!("server interrupted playback — clearing speaker buffer");
@@ -951,14 +975,31 @@ async fn run_session(
                             echo_guard.reset();
                             shared.lock().await.is_speaking = false;
                             let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
+                            if deferred_refresh {
+                                tracing::info!(
+                                    "executing deferred session refresh after interruption"
+                                );
+                                immediate_reconnect = true;
+                                break;
+                            }
                         }
 
                         gemini::GeminiEvent::TurnComplete => {
+                            model_turn_active = false;
                             awaiting_response_since = None;
                             response_timer = None;
                             saw_untrusted_in_turn = false;
-                            shared.lock().await.is_speaking = false;
-                            let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
+                            if speaker_queued.load(Ordering::Acquire) == 0 {
+                                shared.lock().await.is_speaking = false;
+                                let _ = event_tx.send(AppEvent::StateChange(AppState::Listening));
+                            }
+                            if deferred_refresh {
+                                tracing::info!(
+                                    "executing deferred session refresh after turn complete"
+                                );
+                                immediate_reconnect = true;
+                                break;
+                            }
                         }
 
                         gemini::GeminiEvent::ToolCall(calls) => {
@@ -982,9 +1023,22 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::GoAway { time_left } => {
-                            tracing::info!("Gemini GoAway ({:?}) — refreshing session cleanly", time_left);
-                            let _ = event_tx.send(AppEvent::Log("refreshing session...".to_string()));
-                            break;
+                            if model_turn_active || awaiting_response_since.is_some() {
+                                tracing::info!(
+                                    "Gemini GoAway ({:?}) — deferring refresh until current turn finishes",
+                                    time_left
+                                );
+                                deferred_refresh = true;
+                            } else {
+                                tracing::info!(
+                                    "Gemini GoAway ({:?}) — refreshing session cleanly",
+                                    time_left
+                                );
+                                let _ =
+                                    event_tx.send(AppEvent::Log("refreshing session...".to_string()));
+                                immediate_reconnect = true;
+                                break;
+                            }
                         }
 
                         gemini::GeminiEvent::Closed(reason) => {
@@ -1029,6 +1083,7 @@ async fn run_session(
 
                 Some(()) = int_guard.recv() => {
                     tracing::info!("user interrupt — clearing speaker buffer");
+                    model_turn_active = false;
                     send_playback(&playback_slot, PlaybackCmd::Clear).await;
                     echo_guard.reset();
                     awaiting_response_since = None;
@@ -1070,19 +1125,23 @@ async fn run_session(
                     }
                 }
 
-                Ok(app_ev) = internal_rx.recv() => {
-                    match app_ev {
-                        AppEvent::TimerAlert(msg) => {
+                res = internal_rx.recv() => {
+                    match res {
+                        Ok(AppEvent::TimerAlert(msg)) => {
                             let prompt = format!("[TIMER_ALERT] The user's timer just finished: {msg}");
                             if let Err(e) = session.send_text(&prompt).await {
                                 tracing::error!("timer alert send: {e}");
                             }
                         }
-                        AppEvent::Shutdown => {
+                        Ok(AppEvent::Shutdown) => {
                             should_shutdown = true;
                             break;
                         }
-                        _ => {}
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("internal_rx lagged by {n} events");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
 
@@ -1106,8 +1165,18 @@ async fn run_session(
                     }
 
                     if session_started.elapsed().as_secs() >= MAX_SESSION_AGE_SECS {
-                        tracing::info!("session reached 14m — rotating connection cleanly");
-                        break;
+                        if model_turn_active || awaiting_response_since.is_some() {
+                            if !deferred_refresh {
+                                tracing::info!(
+                                    "session reached 14m during active turn — deferring rotation until turn finishes"
+                                );
+                                deferred_refresh = true;
+                            }
+                        } else {
+                            tracing::info!("session reached 14m — rotating connection cleanly");
+                            immediate_reconnect = true;
+                            break;
+                        }
                     }
 
                     if last_monitor_check.elapsed().as_secs() >= MONITOR_CHECK_INTERVAL_SECS {
