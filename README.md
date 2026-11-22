@@ -30,29 +30,7 @@ Boogie was rewritten from the ground up in **pure Rust** to eliminate interprete
 
 > Measured on Windows 10/11 x64 (`target/release/boogie.exe`, active WASAPI audio streams + OpenGL 3D shader + Gemini Live TLS WebSocket).
 
-```text
-⚡ Cold Startup Speed — Launch to Window Ready (shorter is better)
-──────────────────────────────────────────────────────────────────────────
-Boogie (Rust Native)        █░░░░░░░░░░░░░░░░░░░   0.14s  (137 ms window · 0.74s full GPU+API)
-Python + PyQt6              ███████████░░░░░░░░░   2.5 – 4.5s
-Electron / Chromium App     ████████████████████   3.5 – 7.0s
-```
-
-```text
-🧠 Memory Consumption — Active Voice Session (shorter is better)
-──────────────────────────────────────────────────────────────────────────
-Boogie (Rust Private RAM)   ██░░░░░░░░░░░░░░░░░░   33.3 MB  (~60.8 MB working set w/ GPU + DLLs)
-Python + PyQt6              ███████████░░░░░░░░░  240 – 380 MB
-Electron / Chromium App     ████████████████████  450 – 800+ MB
-```
-
-```text
-📦 Footprint on Disk — Ready to Run (shorter is better)
-──────────────────────────────────────────────────────────────────────────
-Boogie (Single .exe)        ██░░░░░░░░░░░░░░░░░░   28.0 MB  (zero external runtime)
-Python + Embedded Env       ████████████░░░░░░░░  350+ MB   (Python + Qt + wheels)
-Electron Bundle             ████████████████████  250 – 600 MB
-```
+<img src="assets/perf_comparison.svg" alt="Visual Performance Comparison: Cold Startup Speed, Memory Consumption, and Footprint on Disk" width="100%" />
 
 ### Real Measured Cold-Boot Timeline
 
@@ -86,14 +64,8 @@ Instead of chaining three slow stages (**Speech-to-Text → Chat LLM → Text-to
 
 > Measured live on Windows x64 (`models/gemini-3.1-flash-live-preview`, persistent WebSocket session across conversational turns: **541 ms / 572 ms / 626 ms** → **~580 ms avg** to first audio byte).
 
-```text
-🎙️ Time to First Spoken Word After Asking (shorter is better)
-──────────────────────────────────────────────────────────────────────────
-Boogie API First Audio (TTFB)    ███░░░░░░░░░░░░░░░░░   0.58s  (541 – 626 ms measured)
-Boogie Total Voice-to-Voice*     ██████░░░░░░░░░░░░░░   1.0 – 1.3s  (incl. 450–750 ms VAD)
-Cascaded STT → LLM → Cloud TTS   ██████████████░░░░░░   2.5 – 4.2s  (3 serial round-trips)
-Local Whisper + LLM + TTS        ████████████████████   3.5 – 6.0s+ (batch decode + synth)
-```
+<img src="assets/latency_comparison.svg" alt="Visual Response Latency Comparison: Time to First Spoken Word" width="100%" />
+
 > \*Total voice-to-voice time includes natural end-of-speech silence detection so Boogie never cuts off the last syllable of your sentence.
 
 ### Step-by-Step Response Pipeline Breakdown
@@ -213,7 +185,9 @@ Or configure manually by copying `config/api_keys.example.json` to `target/relea
 │   ├── logo_icon.png           # 256px embedded window/header icon
 │   ├── logo.ico                # Multi-res Windows executable icon
 │   ├── boogie.rc               # Windows icon resource definition
-│   └── screenshot.png          # UI showcase screenshot
+│   ├── screenshot.png          # UI showcase screenshot
+│   ├── perf_comparison.svg     # Vector performance comparison chart
+│   └── latency_comparison.svg  # Vector voice latency comparison chart
 ├── core/
 │   └── prompt.txt              # Embedded system prompt (overridable externally)
 ├── config/
