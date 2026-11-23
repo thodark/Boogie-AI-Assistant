@@ -9,5 +9,9 @@
   "output_device": "",
   "push_to_talk": false,
   "proactive_audio": true,
-  "dashboard_enabled": false
+  "dashboard_enabled": false,
+  "graphics_quality": "high",
+  "color_theme": "obsidian",
+  "auto_memory_consolidation": true,
+  "memory_model": "gemini-2.5-flash-lite"
 }

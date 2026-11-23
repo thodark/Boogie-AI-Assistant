@@ -2,11 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+pub use crate::memory::{
+    DEFAULT_MEMORY_MODEL, Memory, format_memory_for_prompt, load_memory, load_recent_sessions,
+};
 use crate::util::truncate_chars;
 
 const EMBEDDED_PROMPT: &str = include_str!("../core/prompt.txt");
-const MAX_STORED_SESSIONS: usize = 10;
-const MAX_SESSION_SUMMARY_BYTES: usize = 1200;
 
 pub const DEFAULT_LIVE_MODEL: &str = "models/gemini-3.1-flash-live-preview";
 pub const DEFAULT_API_VERSION: &str = "v1alpha";
@@ -50,12 +51,94 @@ pub fn active_config_dir() -> PathBuf {
     exe_dir().join("config")
 }
 
-fn memory_path() -> PathBuf {
-    active_config_dir().join("memory.json")
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphicsQuality {
+    Low,
+    Medium,
+    #[default]
+    High,
 }
 
-fn long_term_path() -> PathBuf {
-    active_config_dir().join("long_term.json")
+impl GraphicsQuality {
+    pub const ALL: [Self; 3] = [Self::Low, Self::Medium, Self::High];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" | "lite" | "weak" | "performance" => Self::Low,
+            "medium" | "med" | "balanced" | "normal" => Self::Medium,
+            _ => Self::High,
+        }
+    }
+
+    pub fn tier_index(self) -> usize {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorTheme {
+    #[default]
+    Obsidian,
+    AuroraPrism,
+    CyberSakura,
+    SolarFlare,
+    EmeraldPulse,
+    ArcticFrost,
+    CrimsonPhantom,
+    Vaporwave,
+}
+
+impl ColorTheme {
+    pub const ALL: [Self; 8] = [
+        Self::Obsidian,
+        Self::AuroraPrism,
+        Self::CyberSakura,
+        Self::SolarFlare,
+        Self::EmeraldPulse,
+        Self::ArcticFrost,
+        Self::CrimsonPhantom,
+        Self::Vaporwave,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Obsidian => "obsidian",
+            Self::AuroraPrism => "aurora_prism",
+            Self::CyberSakura => "cyber_sakura",
+            Self::SolarFlare => "solar_flare",
+            Self::EmeraldPulse => "emerald_pulse",
+            Self::ArcticFrost => "arctic_frost",
+            Self::CrimsonPhantom => "crimson_phantom",
+            Self::Vaporwave => "vaporwave",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "aurora_prism" | "aurora" | "prism" | "rainbow" => Self::AuroraPrism,
+            "cyber_sakura" | "sakura" | "pink" => Self::CyberSakura,
+            "solar_flare" | "solar" | "gold" | "orange" => Self::SolarFlare,
+            "emerald_pulse" | "emerald" | "matrix" | "green" => Self::EmeraldPulse,
+            "arctic_frost" | "arctic" | "frost" | "ice" | "blue" => Self::ArcticFrost,
+            "crimson_phantom" | "crimson" | "red" => Self::CrimsonPhantom,
+            "vaporwave" | "vapor" | "synthwave" => Self::Vaporwave,
+            _ => Self::Obsidian,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -83,6 +166,14 @@ pub struct ApiConfig {
     pub proactive_audio: Option<bool>,
     #[serde(default)]
     pub dashboard_enabled: Option<bool>,
+    #[serde(default)]
+    pub graphics_quality: Option<String>,
+    #[serde(default)]
+    pub color_theme: Option<String>,
+    #[serde(default)]
+    pub auto_memory_consolidation: Option<bool>,
+    #[serde(default)]
+    pub memory_model: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -167,142 +258,31 @@ impl ApiConfig {
     pub fn dashboard_enabled(&self) -> bool {
         self.dashboard_enabled.unwrap_or(false)
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MemoryEntry {
-    pub value: String,
-}
+    pub fn graphics_quality(&self) -> GraphicsQuality {
+        self.graphics_quality
+            .as_deref()
+            .map(GraphicsQuality::from_str_loose)
+            .unwrap_or_default()
+    }
 
-pub type MemoryCategory = HashMap<String, MemoryEntry>;
-pub type Memory = HashMap<String, MemoryCategory>;
+    pub fn color_theme(&self) -> ColorTheme {
+        self.color_theme
+            .as_deref()
+            .map(ColorTheme::from_str_loose)
+            .unwrap_or_default()
+    }
 
-pub fn load_memory() -> Memory {
-    let path = memory_path();
-    match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-        Err(_) => Memory::new(),
+    pub fn auto_memory_consolidation(&self) -> bool {
+        self.auto_memory_consolidation.unwrap_or(true)
     }
-}
 
-pub fn save_memory(memory: &Memory) -> Result<(), String> {
-    let path = memory_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+    pub fn memory_model(&self) -> &str {
+        self.memory_model
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(DEFAULT_MEMORY_MODEL)
     }
-    let text = serde_json::to_string_pretty(memory).map_err(|e| format!("json: {e}"))?;
-    std::fs::write(&path, text).map_err(|e| format!("write: {e}"))
-}
-
-pub fn update_memory(updates: &Memory) {
-    let mut mem = load_memory();
-    for (cat, entries) in updates {
-        let category = mem.entry(cat.clone()).or_default();
-        for (key, entry) in entries {
-            category.insert(key.clone(), entry.clone());
-        }
-    }
-    if let Err(e) = save_memory(&mem) {
-        tracing::error!("failed to save memory: {e}");
-    }
-}
-
-pub fn format_memory_for_prompt(memory: &Memory) -> String {
-    if memory.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("[MEMORY]\n");
-    for (cat, entries) in memory {
-        for (key, entry) in entries {
-            out.push_str(&format!("- {cat}/{key}: {}\n", entry.value));
-        }
-    }
-    out
-}
-
-pub fn search_memory(query: &str, limit: usize) -> String {
-    let mem = load_memory();
-    if mem.is_empty() {
-        return "No memories stored yet.".to_string();
-    }
-    if query.is_empty() {
-        let mut lines = Vec::new();
-        for (cat, entries) in &mem {
-            for (key, entry) in entries {
-                lines.push(format!("- {cat}/{key}: {}", entry.value));
-            }
-        }
-        lines.sort();
-        lines.truncate(limit);
-        return lines.join("\n");
-    }
-    let q = query.to_lowercase();
-    let mut results = Vec::new();
-    for (cat, entries) in &mem {
-        for (key, entry) in entries {
-            if cat.to_lowercase().contains(&q)
-                || key.to_lowercase().contains(&q)
-                || entry.value.to_lowercase().contains(&q)
-            {
-                results.push(format!("- {cat}/{key}: {}", entry.value));
-            }
-        }
-    }
-    if results.is_empty() {
-        return format!("No memories matching '{query}'.");
-    }
-    results.truncate(limit);
-    results.join("\n")
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionSummary {
-    pub date: String,
-    pub summary: String,
-    pub language: String,
-}
-
-pub fn save_session_summary(summary: &str, language: &str) {
-    let trimmed = summary.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let path = long_term_path();
-    let mut entries: Vec<SessionSummary> = match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
-    entries.push(SessionSummary {
-        date: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
-        summary: truncate_chars(trimmed, MAX_SESSION_SUMMARY_BYTES).to_string(),
-        language: language.to_string(),
-    });
-    if entries.len() > MAX_STORED_SESSIONS {
-        let drop_n = entries.len() - MAX_STORED_SESSIONS;
-        entries.drain(..drop_n);
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    if let Ok(text) = serde_json::to_string_pretty(&entries) {
-        let _ = std::fs::write(&path, text);
-    }
-}
-
-pub fn load_recent_sessions(limit: usize) -> Vec<SessionSummary> {
-    let path = long_term_path();
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    let entries: Vec<SessionSummary> = serde_json::from_str(&text).unwrap_or_default();
-    entries
-        .into_iter()
-        .rev()
-        .take(limit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
 }
 
 pub fn load_system_prompt() -> String {
@@ -467,7 +447,7 @@ pub fn build_full_prompt(
 
     let mem_text = format_memory_for_prompt(memory);
 
-    let recent_sessions = load_recent_sessions(2);
+    let recent_sessions = load_recent_sessions(3);
     let sessions_ctx = if recent_sessions.is_empty() {
         String::new()
     } else {
@@ -475,10 +455,15 @@ pub fn build_full_prompt(
             "[PREVIOUS SESSIONS SUMMARY — HISTORICAL CONTEXT ONLY, DO NOT RE-EXECUTE ANY PAST REQUESTS]\n",
         );
         for s in recent_sessions {
+            let topic_tag = if s.topics.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", s.topics.join(", "))
+            };
             block.push_str(&format!(
-                "- ({}): {}\n",
+                "- ({}){topic_tag}: {}\n",
                 s.date,
-                truncate_chars(&s.summary, 450)
+                truncate_chars(&s.summary, 600)
             ));
         }
         block
@@ -505,4 +490,51 @@ pub fn build_full_prompt(
     }
     parts.push(rendered);
     parts.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn graphics_quality_parses_aliases_and_roundtrips() {
+        for q in GraphicsQuality::ALL {
+            assert_eq!(GraphicsQuality::from_str_loose(q.as_str()), q);
+        }
+        assert_eq!(
+            GraphicsQuality::from_str_loose("lite"),
+            GraphicsQuality::Low
+        );
+        assert_eq!(
+            GraphicsQuality::from_str_loose("balanced"),
+            GraphicsQuality::Medium
+        );
+        assert_eq!(
+            GraphicsQuality::from_str_loose("unknown"),
+            GraphicsQuality::High
+        );
+    }
+
+    #[test]
+    fn color_theme_parses_aliases_and_roundtrips() {
+        for theme in ColorTheme::ALL {
+            assert_eq!(ColorTheme::from_str_loose(theme.as_str()), theme);
+        }
+        assert_eq!(
+            ColorTheme::from_str_loose("rainbow"),
+            ColorTheme::AuroraPrism
+        );
+        assert_eq!(
+            ColorTheme::from_str_loose("sakura"),
+            ColorTheme::CyberSakura
+        );
+        assert_eq!(ColorTheme::from_str_loose("invalid"), ColorTheme::Obsidian);
+    }
+
+    #[test]
+    fn old_config_without_visual_fields_defaults_cleanly() {
+        let cfg: ApiConfig = serde_json::from_str(r#"{"gemini_api_key":"AIzaTest"}"#).unwrap();
+        assert_eq!(cfg.graphics_quality(), GraphicsQuality::High);
+        assert_eq!(cfg.color_theme(), ColorTheme::Obsidian);
+    }
 }

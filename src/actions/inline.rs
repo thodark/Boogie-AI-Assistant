@@ -1,8 +1,7 @@
 use crate::AppEvent;
-use crate::config::{MemoryEntry, search_memory, update_memory};
+use crate::memory::{forget_memory, search_memory, upsert_fact};
 use crate::tools::{ToolRegistry, ToolResult};
 use serde_json::Value;
-use std::collections::HashMap;
 use tokio::sync::broadcast;
 
 use super::{param, tool};
@@ -27,8 +26,8 @@ pub fn register(registry: &mut ToolRegistry, event_tx: broadcast::Sender<AppEven
     registry.register(
         tool(
             "save_memory",
-            "Silently save a fact about the user to long-term memory. Use whenever you learn \
-             something important about the user (preferences, name, language, habits). \
+            "Silently save or update a durable fact about the user in long-term memory \
+             (identity, preferences, projects, people, habits, goals, ongoing life context). \
              Do NOT announce that you are saving — just do it silently.",
             vec![
                 (
@@ -36,11 +35,30 @@ pub fn register(registry: &mut ToolRegistry, event_tx: broadcast::Sender<AppEven
                     param(
                         "category",
                         "string",
-                        "Memory category (e.g. identity, preferences, habits)",
+                        "Category (e.g. identity, preferences, projects, people, habits, goals, life)",
                     ),
                 ),
-                ("key", param("key", "string", "Key name for this memory")),
-                ("value", param("value", "string", "The value to remember")),
+                (
+                    "key",
+                    param("key", "string", "Short snake_case key name for this fact"),
+                ),
+                ("value", param("value", "string", "The concise fact to remember")),
+                (
+                    "importance",
+                    param(
+                        "importance",
+                        "integer",
+                        "Priority from 1 (minor) to 5 (core identity/critical), default 3",
+                    ),
+                ),
+                (
+                    "tags",
+                    param(
+                        "tags",
+                        "string",
+                        "Optional comma-separated keywords to aid future recall",
+                    ),
+                ),
             ],
             vec!["key", "value"],
         ),
@@ -50,17 +68,47 @@ pub fn register(registry: &mut ToolRegistry, event_tx: broadcast::Sender<AppEven
     registry.register(
         tool(
             "recall_memory",
-            "Search stored memories about the user. Use when you need to remember something about the user.",
+            "Search stored long-term memories AND past conversation summaries about the user \
+             (supports Vietnamese with or without accents and multi-word queries). \
+             Call this whenever the user references past talks, personal details, or [ALSO REMEMBERED] items.",
             vec![
                 (
                     "query",
-                    param("query", "string", "Search query (empty to list all)"),
+                    param("query", "string", "Search keywords (empty to list top memories)"),
                 ),
                 ("limit", param("limit", "integer", "Max results to return")),
             ],
             vec![],
         ),
         Box::new(|args| Box::pin(recall_memory_handler(args))),
+    );
+
+    registry.register(
+        tool(
+            "forget_memory",
+            "Delete an outdated, wrong, or unwanted fact from long-term memory. \
+             Use when the user asks you to forget something or corrects an old stored fact.",
+            vec![
+                (
+                    "category",
+                    param("category", "string", "Optional memory category"),
+                ),
+                (
+                    "key",
+                    param("key", "string", "Optional exact key to delete"),
+                ),
+                (
+                    "query",
+                    param(
+                        "query",
+                        "string",
+                        "Optional search query to match and delete a memory if key is unknown",
+                    ),
+                ),
+            ],
+            vec![],
+        ),
+        Box::new(|args| Box::pin(forget_memory_handler(args))),
     );
 
     registry.register(
@@ -100,20 +148,20 @@ async fn save_memory_handler(args: Value) -> ToolResult {
         .get("value")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    if key.is_empty() || value.is_empty() {
-        return ToolResult::err("key and value are required");
+    let importance = args
+        .get("importance")
+        .and_then(|v| v.as_u64())
+        .map(|n| n.clamp(1, 5) as u8);
+    let tags: Vec<String> = args
+        .get("tags")
+        .and_then(|v| v.as_str())
+        .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    match upsert_fact(category, key, value, importance, tags) {
+        Ok((cat, k)) => ToolResult::ok(format!("saved {cat}/{k}")),
+        Err(e) => ToolResult::err(e),
     }
-    let mut cat_map = HashMap::new();
-    cat_map.insert(
-        key.to_string(),
-        MemoryEntry {
-            value: value.to_string(),
-        },
-    );
-    let mut mem = HashMap::new();
-    mem.insert(category.to_string(), cat_map);
-    update_memory(&mem);
-    ToolResult::ok(format!("saved {category}/{key}"))
 }
 
 async fn recall_memory_handler(args: Value) -> ToolResult {
@@ -121,9 +169,19 @@ async fn recall_memory_handler(args: Value) -> ToolResult {
         .get("query")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
     let result = search_memory(query, limit);
     ToolResult::ok(result)
+}
+
+async fn forget_memory_handler(args: Value) -> ToolResult {
+    let category = args.get("category").and_then(|v| v.as_str());
+    let key = args.get("key").and_then(|v| v.as_str());
+    let query = args.get("query").and_then(|v| v.as_str());
+    match forget_memory(category, key, query) {
+        Ok(msg) => ToolResult::ok(msg),
+        Err(e) => ToolResult::err(e),
+    }
 }
 
 async fn system_status(_args: Value) -> ToolResult {

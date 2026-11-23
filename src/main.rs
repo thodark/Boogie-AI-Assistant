@@ -7,8 +7,10 @@ mod dsp;
 mod echo;
 mod gemini;
 mod gui;
+mod memory;
 mod orb_shader;
 mod proactive;
+mod theme;
 mod tools;
 mod util;
 
@@ -247,6 +249,7 @@ pub struct SharedState {
     pub ptt_active: bool,
     pub resume_handle: Option<String>,
     pub session_log: Vec<String>,
+    pub consolidated_turns: usize,
     pub last_user_speech: Instant,
 }
 
@@ -259,8 +262,26 @@ impl SharedState {
             ptt_active: false,
             resume_handle: None,
             session_log: Vec::new(),
+            consolidated_turns: 0,
             last_user_speech: Instant::now(),
         }
+    }
+
+    pub fn push_turn(&mut self, speaker: &str, chunk: &str) {
+        let before = self.session_log.len();
+        memory::push_transcript_turn(&mut self.session_log, speaker, chunk);
+        if before == 200 && self.session_log.len() == 200 {
+            self.consolidated_turns = self.consolidated_turns.saturating_sub(1);
+        }
+    }
+
+    pub fn take_unsummarized_turns(&mut self) -> Vec<String> {
+        if self.consolidated_turns >= self.session_log.len() {
+            return Vec::new();
+        }
+        let slice = self.session_log[self.consolidated_turns..].to_vec();
+        self.consolidated_turns = self.session_log.len();
+        slice
     }
 }
 
@@ -290,7 +311,11 @@ fn main() {
         )
         .init();
 
-    tracing::info!("Boogie starting (log: {})", log_path.display());
+    tracing::info!(
+        "Boogie v{} starting (log: {})",
+        env!("CARGO_PKG_VERSION"),
+        log_path.display()
+    );
 
     let (initial_cfg, initial_cfg_err) = match config::ApiConfig::load() {
         Ok(c) => (Some(c), None),
@@ -331,14 +356,18 @@ fn main() {
         .build()
         .expect("failed to build tokio runtime");
 
+    let latest_cfg = Arc::new(Mutex::new(initial_cfg.clone()));
+
     let event_tx_sup = event_tx.clone();
     let shared_sup = shared.clone();
     let tools_sup = tool_registry.clone();
     let cfg_sup = initial_cfg.clone();
+    let latest_cfg_sup = latest_cfg.clone();
 
     rt.spawn(async move {
         run_supervisor(
             cfg_sup,
+            latest_cfg_sup,
             config_rx,
             audio_cmd_tx,
             tools_sup,
@@ -355,6 +384,7 @@ fn main() {
 
     tracing::info!("Boogie starting GUI...");
     let gui_rx = event_tx.subscribe();
+    let shared_exit = shared.clone();
     if let Err(e) = gui::run_gui(
         gui_rx,
         shared,
@@ -366,11 +396,34 @@ fn main() {
     ) {
         tracing::error!("gui: {e}");
     }
+
+    // Ensure conversation memory is saved cleanly even when user closes the window via 'X'
+    let _ = event_tx.send(AppEvent::Shutdown);
+    rt.block_on(async move {
+        let pending_turns = shared_exit.lock().await.take_unsummarized_turns();
+        if pending_turns.is_empty() {
+            return;
+        }
+        let cfg_opt = latest_cfg.lock().await.clone();
+        let mem = config::load_memory();
+        let lang = config::detect_language(&mem);
+        if let Some(cfg) = cfg_opt {
+            tracing::info!(
+                "flushing {} unsummarized conversation turn(s) before exit",
+                pending_turns.len()
+            );
+            memory::consolidate_session(&cfg, &pending_turns, &lang, true).await;
+        } else {
+            let fallback = memory::build_local_fallback_summary(&pending_turns);
+            memory::save_session_summary_rich(&fallback, &lang, Vec::new(), false);
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_supervisor(
     initial_cfg: Option<config::ApiConfig>,
+    latest_cfg: Arc<Mutex<Option<config::ApiConfig>>>,
     mut config_rx: mpsc::Receiver<config::ApiConfig>,
     audio_cmd_tx: std::sync::mpsc::Sender<AudioCmd>,
     tools: Arc<tools::ToolRegistry>,
@@ -388,6 +441,7 @@ async fn run_supervisor(
             let _ = event_tx.send(AppEvent::StateChange(AppState::Sleeping));
             match config_rx.recv().await {
                 Some(c) => {
+                    *latest_cfg.lock().await = Some(c.clone());
                     {
                         let mut s = shared.lock().await;
                         s.push_to_talk = c.push_to_talk();
@@ -425,6 +479,7 @@ async fn run_supervisor(
 
     loop {
         let active_cfg_run = active_cfg.clone();
+        let latest_cfg_run = latest_cfg.clone();
         let config_rx_run = config_rx.clone();
         let audio_cmd_run = audio_cmd_tx.clone();
         let tools_run = tools.clone();
@@ -439,6 +494,7 @@ async fn run_supervisor(
         let handle = tokio::spawn(async move {
             run_session(
                 active_cfg_run,
+                latest_cfg_run,
                 config_rx_run,
                 audio_cmd_run,
                 tools_run,
@@ -484,10 +540,12 @@ fn config_requires_reconnect(old: &config::ApiConfig, new: &config::ApiConfig) -
         || old.user_name != new.user_name
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_config_update(
     cfg: &mut config::ApiConfig,
     new_cfg: config::ApiConfig,
     active_cfg: &Arc<Mutex<config::ApiConfig>>,
+    latest_cfg: &Arc<Mutex<Option<config::ApiConfig>>>,
     shared: &Arc<Mutex<SharedState>>,
     audio_cmd_tx: &std::sync::mpsc::Sender<AudioCmd>,
     event_tx: &broadcast::Sender<AppEvent>,
@@ -515,20 +573,26 @@ async fn apply_config_update(
     }
 
     *cfg = new_cfg.clone();
+    *latest_cfg.lock().await = Some(new_cfg.clone());
     *active_cfg.lock().await = new_cfg;
     let _ = event_tx.send(AppEvent::Log("Settings saved".to_string()));
     tracing::info!(
-        "settings updated (ptt={}, proactive={}, reconnect={reconnect_needed}, audio_reload={devices_changed})",
+        "settings updated (ptt={}, proactive={}, ai_mem={}, graphics={}, theme={}, reconnect={reconnect_needed}, audio_reload={devices_changed})",
         cfg.push_to_talk(),
-        cfg.proactive_audio()
+        cfg.proactive_audio(),
+        cfg.auto_memory_consolidation(),
+        cfg.graphics_quality().as_str(),
+        cfg.color_theme().as_str(),
     );
     reconnect_needed
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn sleep_or_reconfig(
     secs: u64,
     cfg: &mut config::ApiConfig,
     active_cfg: &Arc<Mutex<config::ApiConfig>>,
+    latest_cfg: &Arc<Mutex<Option<config::ApiConfig>>>,
     config_rx: &Arc<Mutex<mpsc::Receiver<config::ApiConfig>>>,
     shared: &Arc<Mutex<SharedState>>,
     audio_cmd_tx: &std::sync::mpsc::Sender<AudioCmd>,
@@ -538,7 +602,7 @@ async fn sleep_or_reconfig(
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_secs(secs)) => false,
         Some(new_cfg) = cg.recv() => {
-            apply_config_update(cfg, new_cfg, active_cfg, shared, audio_cmd_tx, event_tx).await;
+            apply_config_update(cfg, new_cfg, active_cfg, latest_cfg, shared, audio_cmd_tx, event_tx).await;
             true
         }
     }
@@ -547,6 +611,7 @@ async fn sleep_or_reconfig(
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
     active_cfg: Arc<Mutex<config::ApiConfig>>,
+    latest_cfg: Arc<Mutex<Option<config::ApiConfig>>>,
     config_rx: Arc<Mutex<mpsc::Receiver<config::ApiConfig>>>,
     audio_cmd_tx: std::sync::mpsc::Sender<AudioCmd>,
     tools: Arc<tools::ToolRegistry>,
@@ -632,6 +697,7 @@ async fn run_session(
                     backoff_secs,
                     &mut cfg,
                     &active_cfg,
+                    &latest_cfg,
                     &config_rx,
                     &shared,
                     &audio_cmd_tx,
@@ -657,6 +723,7 @@ async fn run_session(
                 backoff_secs,
                 &mut cfg,
                 &active_cfg,
+                &latest_cfg,
                 &config_rx,
                 &shared,
                 &audio_cmd_tx,
@@ -957,13 +1024,13 @@ async fn run_session(
                         gemini::GeminiEvent::OutputTranscript(text) => {
                             awaiting_response_since = None;
                             let _ = event_tx.send(AppEvent::Log(format!("Boogie: {text}")));
-                            shared.lock().await.session_log.push(format!("assistant: {text}"));
+                            shared.lock().await.push_turn("assistant", &text);
                         }
 
                         gemini::GeminiEvent::InputTranscript(text) => {
                             saw_untrusted_in_turn = false;
                             let _ = event_tx.send(AppEvent::Log(format!("User: {text}")));
-                            shared.lock().await.session_log.push(format!("user: {text}"));
+                            shared.lock().await.push_turn("user", &text);
                         }
 
                         gemini::GeminiEvent::Interrupted => {
@@ -1099,6 +1166,7 @@ async fn run_session(
                         &mut cfg,
                         new_cfg,
                         &active_cfg,
+                        &latest_cfg,
                         &shared,
                         &audio_cmd_tx,
                         &event_tx,
@@ -1222,20 +1290,20 @@ async fn run_session(
         drop(int_guard);
         drop(cfg_guard);
 
-        // Save compact session summary with real detected language
+        // Consolidate unsummarized conversation turns (non-blocking on reconnect, awaited on shutdown)
         {
-            let mem = config::load_memory();
-            let lang = config::detect_language(&mem);
-            let s = shared.lock().await;
-            if !s.session_log.is_empty() {
-                let last_entries: Vec<&String> = s.session_log.iter().rev().take(20).collect();
-                let summary = last_entries
-                    .iter()
-                    .rev()
-                    .map(|line| line.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                config::save_session_summary(&summary, &lang);
+            let pending_turns = shared.lock().await.take_unsummarized_turns();
+            if !pending_turns.is_empty() {
+                let mem = config::load_memory();
+                let lang = config::detect_language(&mem);
+                let cfg_snap = cfg.clone();
+                if should_shutdown {
+                    memory::consolidate_session(&cfg_snap, &pending_turns, &lang, true).await;
+                } else {
+                    tokio::spawn(async move {
+                        memory::consolidate_session(&cfg_snap, &pending_turns, &lang, false).await;
+                    });
+                }
             }
         }
 
@@ -1255,6 +1323,7 @@ async fn run_session(
             backoff_secs,
             &mut cfg,
             &active_cfg,
+            &latest_cfg,
             &config_rx,
             &shared,
             &audio_cmd_tx,

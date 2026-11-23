@@ -7,14 +7,16 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
-use crate::config::ApiConfig;
+use crate::config::{ApiConfig, ColorTheme, GraphicsQuality};
 use crate::orb_shader::{OrbRenderer, OrbUniforms};
+use crate::theme::{self, ThemePalette};
 use crate::{AppEvent, AppState, ConfirmResponse, SharedState};
 
-// --- Obsidian + Violet-Cyan Neon Palette ---
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// --- Base Obsidian Palette (Dynamic theme accents come from `crate::theme::ThemePalette`) ---
 const BG_OBSIDIAN: Color32 = Color32::from_rgb(7, 6, 16);
 const VIOLET: Color32 = Color32::from_rgb(148, 108, 255);
-const CYAN: Color32 = Color32::from_rgb(38, 224, 245);
 const MINT: Color32 = Color32::from_rgb(64, 242, 184);
 const AMBER: Color32 = Color32::from_rgb(255, 162, 72);
 const CRIMSON: Color32 = Color32::from_rgb(255, 76, 114);
@@ -51,11 +53,20 @@ struct ConfirmDisplay {
     detail: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    General,
+    Memory,
+}
+
 struct SetupForm {
     is_settings: bool,
+    active_tab: SettingsTab,
     base_config: ApiConfig,
     api_key: String,
     show_api_key: bool,
+    graphics_quality: GraphicsQuality,
+    color_theme: ColorTheme,
     voice: String,
     assistant_name: String,
     user_name: String,
@@ -63,8 +74,13 @@ struct SetupForm {
     output_device: String,
     push_to_talk: bool,
     proactive_audio: bool,
+    auto_memory_consolidation: bool,
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
+    memory_filter: String,
+    memory_rows: Vec<crate::memory::MemoryRow>,
+    recent_sessions: Vec<crate::memory::SessionSummary>,
+    confirm_clear_memory: bool,
     error_msg: Option<String>,
 }
 
@@ -80,9 +96,12 @@ impl SetupForm {
             .collect();
         Self {
             is_settings: false,
+            active_tab: SettingsTab::General,
             base_config: ApiConfig::default(),
             api_key: String::new(),
             show_api_key: false,
+            graphics_quality: GraphicsQuality::High,
+            color_theme: ColorTheme::Obsidian,
             voice: "Aoede".to_string(),
             assistant_name: "Boogie".to_string(),
             user_name: String::new(),
@@ -90,8 +109,13 @@ impl SetupForm {
             output_device: String::new(),
             push_to_talk: false,
             proactive_audio: true,
+            auto_memory_consolidation: true,
             available_inputs,
             available_outputs,
+            memory_filter: String::new(),
+            memory_rows: Vec::new(),
+            recent_sessions: Vec::new(),
+            confirm_clear_memory: false,
             error_msg: initial_error,
         }
     }
@@ -108,8 +132,11 @@ impl SetupForm {
         let base = cfg.cloned().unwrap_or_default();
         Self {
             is_settings: true,
+            active_tab: SettingsTab::General,
             api_key: base.gemini_api_key.clone(),
             show_api_key: false,
+            graphics_quality: base.graphics_quality(),
+            color_theme: base.color_theme(),
             voice: base.voice().to_string(),
             assistant_name: base.assistant_name().to_string(),
             user_name: base.user_name.clone().unwrap_or_default(),
@@ -117,11 +144,22 @@ impl SetupForm {
             output_device: base.output_device.clone().unwrap_or_default(),
             push_to_talk: base.push_to_talk(),
             proactive_audio: base.proactive_audio(),
+            auto_memory_consolidation: base.auto_memory_consolidation(),
             available_inputs,
             available_outputs,
+            memory_filter: String::new(),
+            memory_rows: crate::memory::list_memory_rows(),
+            recent_sessions: crate::memory::load_recent_sessions(10),
+            confirm_clear_memory: false,
             error_msg: None,
             base_config: base,
         }
+    }
+
+    fn reload_memories(&mut self) {
+        self.memory_rows = crate::memory::list_memory_rows();
+        self.recent_sessions = crate::memory::load_recent_sessions(10);
+        self.confirm_clear_memory = false;
     }
 }
 
@@ -177,6 +215,16 @@ pub struct BoogieGui {
     drawer_anim: f32,
     spec_bars: [f32; NUM_SPEC_BARS],
 
+    // Graphics tier & color theme (with smooth live-morphing shader colors)
+    graphics_quality: GraphicsQuality,
+    color_theme: ColorTheme,
+    smooth_col_primary: [f32; 3],
+    smooth_col_secondary: [f32; 3],
+    smooth_col_accent: [f32; 3],
+    smooth_bg_center: [f32; 3],
+    smooth_bg_edge: [f32; 3],
+    smooth_rainbow: f32,
+
     entries: Vec<ChatEntry>,
     event_rx: broadcast::Receiver<AppEvent>,
     shared: Arc<Mutex<SharedState>>,
@@ -217,23 +265,46 @@ impl BoogieGui {
 
         let logo_texture = load_logo_texture(&cc.egui_ctx);
 
-        let orb_renderer = cc.gl.as_ref().and_then(|gl| match OrbRenderer::new(gl) {
-            Ok(r) => {
-                tracing::info!("3D Liquid Glass Orb GLSL shader compiled");
-                Some(Arc::new(StdMutex::new(r)))
-            }
-            Err(e) => {
-                tracing::error!("Orb GLSL shader init failed (using 2D fallback): {e}");
-                None
-            }
-        });
+        let initial_quality = initial_cfg
+            .as_ref()
+            .map(ApiConfig::graphics_quality)
+            .unwrap_or_default();
+        let initial_theme = initial_cfg
+            .as_ref()
+            .map(ApiConfig::color_theme)
+            .unwrap_or_default();
+        let initial_pal = ThemePalette::for_theme(initial_theme);
+
+        let orb_renderer =
+            cc.gl
+                .as_ref()
+                .and_then(|gl| match OrbRenderer::new(gl, initial_quality) {
+                    Ok(r) => {
+                        tracing::info!(
+                            "3D Liquid Glass Orb GLSL shader compiled (quality={:?}, theme={:?})",
+                            initial_quality,
+                            initial_theme
+                        );
+                        Some(Arc::new(StdMutex::new(r)))
+                    }
+                    Err(e) => {
+                        tracing::error!("Orb GLSL shader init failed (using 2D fallback): {e}");
+                        None
+                    }
+                });
 
         let ptt = shared.try_lock().map(|s| s.push_to_talk).unwrap_or(false);
         let setup_form = initial_cfg_err.map(|e| SetupForm::new_setup(Some(e)));
+        let initial_weights = if setup_form.is_some() {
+            [1.0, 0.0, 0.0, 0.0]
+        } else {
+            [0.0, 0.0, 1.0, 0.0]
+        };
+        let (init_p, init_s, init_a) = initial_pal.blended_shader_colors(initial_weights, 0.0);
 
         Self {
             state: if setup_form.is_some() {
-                AppState::Sleeping
+                AppState::Listening
             } else {
                 AppState::Thinking
             },
@@ -245,13 +316,22 @@ impl BoogieGui {
             smooth_audio: 0.0,
             smooth_openness: 0.0,
             smooth_width: 0.0,
-            state_weights: [0.0, 0.0, 1.0, 0.0],
+            state_weights: initial_weights,
             smooth_muted: 0.0,
             smooth_mouse: [0.0, 0.0],
             click_pulse: 0.0,
             drawer_open: false,
             drawer_anim: 0.0,
             spec_bars: [0.0; NUM_SPEC_BARS],
+
+            graphics_quality: initial_quality,
+            color_theme: initial_theme,
+            smooth_col_primary: init_p,
+            smooth_col_secondary: init_s,
+            smooth_col_accent: init_a,
+            smooth_bg_center: initial_pal.bg_center,
+            smooth_bg_edge: initial_pal.bg_edge,
+            smooth_rainbow: initial_pal.rainbow,
 
             entries: Vec::new(),
             event_rx,
@@ -406,6 +486,22 @@ impl BoogieGui {
         }
     }
 
+    fn active_quality(&self) -> GraphicsQuality {
+        self.setup_form
+            .as_ref()
+            .map_or(self.graphics_quality, |f| f.graphics_quality)
+    }
+
+    fn active_theme(&self) -> ColorTheme {
+        self.setup_form
+            .as_ref()
+            .map_or(self.color_theme, |f| f.color_theme)
+    }
+
+    fn active_palette(&self) -> ThemePalette {
+        ThemePalette::for_theme(self.active_theme())
+    }
+
     fn update_animations(&mut self, ctx: &egui::Context, dt: f32) {
         // Advance viseme playback queue at hop rate
         let (vis_level, vis_open, vis_width) = if !self.viseme_queue.is_empty() {
@@ -461,6 +557,18 @@ impl BoogieGui {
             7.0,
             dt,
         );
+
+        // Smoothly morph shader palette across state & theme preset changes
+        let pal = self.active_palette();
+        let (target_p, target_s, target_a) =
+            pal.blended_shader_colors(self.state_weights, self.smooth_muted);
+        exp_lerp_rgb(&mut self.smooth_col_primary, target_p, 6.0, dt);
+        exp_lerp_rgb(&mut self.smooth_col_secondary, target_s, 6.0, dt);
+        exp_lerp_rgb(&mut self.smooth_col_accent, target_a, 6.0, dt);
+        exp_lerp_rgb(&mut self.smooth_bg_center, pal.bg_center, 5.0, dt);
+        exp_lerp_rgb(&mut self.smooth_bg_edge, pal.bg_edge, 5.0, dt);
+        self.smooth_rainbow = exp_lerp(self.smooth_rainbow, pal.rainbow, 5.5, dt);
+
         self.drawer_anim = exp_lerp(
             self.drawer_anim,
             if self.drawer_open { 1.0 } else { 0.0 },
@@ -509,13 +617,18 @@ impl BoogieGui {
         if self.muted {
             return CRIMSON;
         }
+        let pal = self.active_palette();
         if self.push_to_talk && self.state == AppState::Listening {
-            return if self.ptt_holding { MINT } else { VIOLET };
+            return if self.ptt_holding {
+                pal.ui_speaking
+            } else {
+                pal.ui_primary
+            };
         }
         match self.state {
-            AppState::Listening => VIOLET,
-            AppState::Speaking => CYAN,
-            AppState::Thinking => AMBER,
+            AppState::Listening => pal.ui_primary,
+            AppState::Speaking => pal.ui_secondary,
+            AppState::Thinking => pal.ui_thinking,
             AppState::Sleeping => TEXT_MUTED,
         }
     }
@@ -599,13 +712,20 @@ impl BoogieGui {
             mouse: self.smooth_mouse,
             muted: self.smooth_muted,
             pulse: self.click_pulse,
+            quality: self.active_quality(),
+            col_primary: self.smooth_col_primary,
+            col_secondary: self.smooth_col_secondary,
+            col_accent: self.smooth_col_accent,
+            bg_center: self.smooth_bg_center,
+            bg_edge: self.smooth_bg_edge,
+            rainbow: self.smooth_rainbow,
         };
 
         if let Some(renderer_arc) = &self.orb_renderer {
             let renderer = Arc::clone(renderer_arc);
             let cb = eframe::egui_glow::CallbackFn::new(move |info, painter| {
                 let vp = info.viewport_in_pixels();
-                if let Ok(r) = renderer.lock() {
+                if let Ok(mut r) = renderer.lock() {
                     r.paint(
                         painter.gl(),
                         [vp.left_px as f32, vp.from_bottom_px as f32],
@@ -632,13 +752,15 @@ impl BoogieGui {
         center_y_gl: f32,
         orb_scale: f32,
     ) {
-        painter.rect_filled(rect, CornerRadius::ZERO, BG_OBSIDIAN);
+        let pal = self.active_palette();
+        painter.rect_filled(rect, CornerRadius::ZERO, pal.ui_bg_tint);
         let center = Pos2::new(
             rect.center().x,
             rect.top() + (1.0 - center_y_gl) * rect.height(),
         );
         let r = rect.width().min(rect.height()) * orb_scale * 0.55;
         let col = self.state_color();
+        let rim = pal.ui_secondary;
         for i in (1..=8).rev() {
             let rad = r + i as f32 * 10.0;
             let a = (24 - i * 2).max(2) as u8;
@@ -654,7 +776,7 @@ impl BoogieGui {
             r,
             Stroke::new(
                 2.0_f32,
-                Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 180),
+                Color32::from_rgba_unmultiplied(rim.r(), rim.g(), rim.b(), 180),
             ),
         );
     }
@@ -698,6 +820,7 @@ impl BoogieGui {
         }
 
         // Left: Brand mark + BOOGIE + Status Pill
+        let pal = self.active_palette();
         let state_col = self.state_color();
         let pulse_alpha = (150.0 + 105.0 * (self.egui_time as f32 * 3.0).sin().abs()) as u8;
 
@@ -718,7 +841,12 @@ impl BoogieGui {
                 CornerRadius::same(5),
                 Stroke::new(
                     0.8_f32,
-                    Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 80),
+                    Color32::from_rgba_unmultiplied(
+                        pal.ui_secondary.r(),
+                        pal.ui_secondary.g(),
+                        pal.ui_secondary.b(),
+                        95,
+                    ),
                 ),
                 egui::StrokeKind::Inside,
             );
@@ -726,14 +854,24 @@ impl BoogieGui {
             painter.circle_filled(
                 logo_rect.center(),
                 7.5,
-                Color32::from_rgba_unmultiplied(VIOLET.r(), VIOLET.g(), VIOLET.b(), 40),
+                Color32::from_rgba_unmultiplied(
+                    pal.ui_primary.r(),
+                    pal.ui_primary.g(),
+                    pal.ui_primary.b(),
+                    40,
+                ),
             );
             painter.circle_stroke(
                 logo_rect.center(),
                 5.0,
                 Stroke::new(
                     1.3_f32,
-                    Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 210),
+                    Color32::from_rgba_unmultiplied(
+                        pal.ui_secondary.r(),
+                        pal.ui_secondary.g(),
+                        pal.ui_secondary.b(),
+                        210,
+                    ),
                 ),
             );
         }
@@ -828,6 +966,7 @@ impl BoogieGui {
             settings_rect,
             "win_settings",
             WinBtnKind::Settings(settings_open),
+            pal.ui_secondary,
         ) {
             if settings_open {
                 self.setup_form = None;
@@ -835,15 +974,33 @@ impl BoogieGui {
                 self.setup_form = Some(SetupForm::from_config(self.current_cfg.as_ref()));
             }
         }
-        if draw_win_button(ui, min_rect, "win_min", WinBtnKind::Minimize) {
+        if draw_win_button(
+            ui,
+            min_rect,
+            "win_min",
+            WinBtnKind::Minimize,
+            pal.ui_secondary,
+        ) {
             ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
         }
         let is_max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
-        if draw_win_button(ui, max_rect, "win_max", WinBtnKind::Maximize(is_max)) {
+        if draw_win_button(
+            ui,
+            max_rect,
+            "win_max",
+            WinBtnKind::Maximize(is_max),
+            pal.ui_secondary,
+        ) {
             ui.ctx()
                 .send_viewport_cmd(ViewportCommand::Maximized(!is_max));
         }
-        if draw_win_button(ui, close_rect, "win_close", WinBtnKind::Close) {
+        if draw_win_button(
+            ui,
+            close_rect,
+            "win_close",
+            WinBtnKind::Close,
+            pal.ui_secondary,
+        ) {
             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
         }
     }
@@ -1007,6 +1164,7 @@ impl BoogieGui {
         );
 
         let a = self.drawer_anim;
+        let pal = self.active_palette();
         let painter = ui.painter();
 
         // Frosted obsidian glass sheet
@@ -1020,7 +1178,12 @@ impl BoogieGui {
             CornerRadius::same(18),
             Stroke::new(
                 1.0_f32,
-                Color32::from_rgba_unmultiplied(178, 168, 255, (a * 42.0) as u8),
+                Color32::from_rgba_unmultiplied(
+                    pal.ui_primary.r(),
+                    pal.ui_primary.g(),
+                    pal.ui_primary.b(),
+                    (a * 52.0) as u8,
+                ),
             ),
             egui::StrokeKind::Inside,
         );
@@ -1032,7 +1195,12 @@ impl BoogieGui {
             ],
             Stroke::new(
                 1.0_f32,
-                Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), (a * 55.0) as u8),
+                Color32::from_rgba_unmultiplied(
+                    pal.ui_secondary.r(),
+                    pal.ui_secondary.g(),
+                    pal.ui_secondary.b(),
+                    (a * 65.0) as u8,
+                ),
             ),
         );
 
@@ -1120,10 +1288,20 @@ impl BoogieGui {
                     LogKind::User => {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                             egui::Frame::new()
-                                .fill(Color32::from_rgba_unmultiplied(110, 74, 224, 52))
+                                .fill(Color32::from_rgba_unmultiplied(
+                                    pal.ui_primary.r(),
+                                    pal.ui_primary.g(),
+                                    pal.ui_primary.b(),
+                                    44,
+                                ))
                                 .stroke(Stroke::new(
                                     1.0_f32,
-                                    Color32::from_rgba_unmultiplied(160, 128, 255, 72),
+                                    Color32::from_rgba_unmultiplied(
+                                        pal.ui_primary.r(),
+                                        pal.ui_primary.g(),
+                                        pal.ui_primary.b(),
+                                        82,
+                                    ),
                                 ))
                                 .corner_radius(CornerRadius {
                                     nw: 14,
@@ -1156,7 +1334,12 @@ impl BoogieGui {
                                 .fill(Color32::from_rgba_unmultiplied(22, 24, 48, 175))
                                 .stroke(Stroke::new(
                                     1.0_f32,
-                                    Color32::from_rgba_unmultiplied(38, 224, 245, 45),
+                                    Color32::from_rgba_unmultiplied(
+                                        pal.ui_secondary.r(),
+                                        pal.ui_secondary.g(),
+                                        pal.ui_secondary.b(),
+                                        58,
+                                    ),
                                 ))
                                 .corner_radius(CornerRadius {
                                     nw: 4,
@@ -1272,6 +1455,7 @@ impl BoogieGui {
         );
 
         let cy = dock_rect.center().y;
+        let pal = self.active_palette();
 
         // 1. Mic Toggle Button (left)
         let mic_center = Pos2::new(dock_rect.left() + 30.0, cy);
@@ -1284,7 +1468,11 @@ impl BoogieGui {
                 "Mute microphone"
             });
 
-        let mic_col = if self.muted { CRIMSON } else { CYAN };
+        let mic_col = if self.muted {
+            CRIMSON
+        } else {
+            pal.ui_secondary
+        };
         let mic_fill_a = if mic_resp.hovered() { 58 } else { 32 };
         painter.circle_filled(
             mic_center,
@@ -1316,6 +1504,7 @@ impl BoogieGui {
         let step = spec_w / NUM_SPEC_BARS as f32;
         let bar_w = (step * 0.46).clamp(2.2, 4.0);
         let max_bar_h = 26.0_f32;
+        let t_now = self.egui_time as f32;
 
         for (i, &val) in self.spec_bars.iter().enumerate() {
             let x = spec_left + (i as f32 + 0.5) * step;
@@ -1324,10 +1513,14 @@ impl BoogieGui {
             let base = if self.muted {
                 Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 95)
             } else {
-                let c = match self.state {
-                    AppState::Speaking => lerp_color(CYAN, MINT, frac),
-                    AppState::Thinking => lerp_color(VIOLET, AMBER, frac),
-                    _ => lerp_color(VIOLET, CYAN, frac),
+                let c = if pal.rainbow > 0.5 {
+                    ThemePalette::rainbow_srgb(frac * 0.85 + t_now * 0.16)
+                } else {
+                    match self.state {
+                        AppState::Speaking => lerp_color(pal.ui_secondary, pal.ui_speaking, frac),
+                        AppState::Thinking => lerp_color(pal.ui_primary, pal.ui_thinking, frac),
+                        _ => lerp_color(pal.ui_primary, pal.ui_secondary, frac),
+                    }
                 };
                 Color32::from_rgba_unmultiplied(
                     c.r(),
@@ -1407,14 +1600,19 @@ impl BoogieGui {
             });
 
         let chat_col = if self.drawer_open {
-            CYAN
+            pal.ui_secondary
         } else if chat_resp.hovered() {
             TEXT_BRIGHT
         } else {
             TEXT_SOFT
         };
         let chat_bg = if self.drawer_open {
-            Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 38)
+            Color32::from_rgba_unmultiplied(
+                pal.ui_secondary.r(),
+                pal.ui_secondary.g(),
+                pal.ui_secondary.b(),
+                38,
+            )
         } else if chat_resp.hovered() {
             Color32::from_rgba_unmultiplied(255, 255, 255, 20)
         } else {
@@ -1438,7 +1636,7 @@ impl BoogieGui {
 
         // Tiny glowing unread badge if conversation has messages and drawer is closed
         if !self.drawer_open && !self.entries.is_empty() {
-            painter.circle_filled(chat_center + Vec2::new(9.5, -9.5), 3.0, VIOLET);
+            painter.circle_filled(chat_center + Vec2::new(9.5, -9.5), 3.0, pal.ui_primary);
         }
 
         if chat_resp.clicked() {
@@ -1632,6 +1830,8 @@ impl BoogieGui {
         let Some(is_settings) = self.setup_form.as_ref().map(|f| f.is_settings) else {
             return;
         };
+        let pal = self.active_palette();
+        let accent = pal.ui_secondary;
 
         let screen = ctx.screen_rect();
         egui::Area::new(egui::Id::new("setup_scrim"))
@@ -1641,7 +1841,7 @@ impl BoogieGui {
                 ui.painter().rect_filled(
                     screen,
                     CornerRadius::ZERO,
-                    Color32::from_rgba_unmultiplied(4, 3, 12, 170),
+                    Color32::from_rgba_unmultiplied(4, 3, 12, 148),
                 );
                 ui.allocate_rect(screen, Sense::click());
             });
@@ -1653,6 +1853,8 @@ impl BoogieGui {
             return;
         };
 
+        let max_scroll_h = (screen.height() - 180.0).clamp(240.0, 560.0);
+
         egui::Window::new("boogie_setup")
             .title_bar(false)
             .collapsible(false)
@@ -1661,32 +1863,42 @@ impl BoogieGui {
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::from_rgba_unmultiplied(13, 12, 28, 246))
+                    .fill(Color32::from_rgba_unmultiplied(13, 12, 28, 236))
                     .stroke(Stroke::new(
                         1.0_f32,
-                        Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 95),
+                        Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 105),
                     ))
                     .corner_radius(CornerRadius::same(18))
                     .inner_margin(egui::Margin::same(22)),
             )
             .show(ctx, |ui| {
-                ui.set_min_width(340.0);
-                ui.set_max_width(420.0);
+                ui.set_min_width(380.0);
+                ui.set_max_width(440.0);
 
-                ui.label(
-                    RichText::new(if form.is_settings {
-                        "BOOGIE SETTINGS"
-                    } else {
-                        "BOOGIE SETUP"
-                    })
-                    .size(10.5)
-                    .color(CYAN)
-                    .family(FontFamily::Monospace),
-                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(if form.is_settings {
+                            "BOOGIE SETTINGS"
+                        } else {
+                            "BOOGIE SETUP"
+                        })
+                        .size(10.5)
+                        .color(accent)
+                        .family(FontFamily::Monospace),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("v{APP_VERSION}"))
+                                .size(10.0)
+                                .color(TEXT_MUTED)
+                                .family(FontFamily::Monospace),
+                        );
+                    });
+                });
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(if form.is_settings {
-                        "Preferences & Audio"
+                        "Graphics, Theme & Preferences"
                     } else {
                         "Connect Gemini Live API"
                     })
@@ -1699,113 +1911,281 @@ impl BoogieGui {
                     ui.label(RichText::new(err).size(11.0).color(AMBER));
                 }
 
-                ui.add_space(12.0);
-                ui.label(RichText::new("Gemini API Key").size(12.0).color(TEXT_SOFT));
-                ui.horizontal(|ui| {
-                    let key_w = (ui.available_width() - 62.0).max(180.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut form.api_key)
-                            .password(!form.show_api_key)
-                            .hint_text("AIza...")
-                            .desired_width(key_w),
-                    );
-                    ui.checkbox(&mut form.show_api_key, "Show");
-                });
+                if form.is_settings {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let tab_w = ((ui.available_width() - 8.0) / 2.0).max(120.0);
+                        let mem_label = format!("Memory ({})", form.memory_rows.len());
+                        for (tab, label) in [
+                            (SettingsTab::General, "General".to_string()),
+                            (SettingsTab::Memory, mem_label),
+                        ] {
+                            let active = form.active_tab == tab;
+                            let fill = if active {
+                                Color32::from_rgba_unmultiplied(
+                                    accent.r(),
+                                    accent.g(),
+                                    accent.b(),
+                                    38,
+                                )
+                            } else {
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 10)
+                            };
+                            let stroke = if active {
+                                Color32::from_rgba_unmultiplied(
+                                    accent.r(),
+                                    accent.g(),
+                                    accent.b(),
+                                    180,
+                                )
+                            } else {
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 24)
+                            };
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(label)
+                                            .size(11.5)
+                                            .color(if active { TEXT_BRIGHT } else { TEXT_SOFT })
+                                            .strong(),
+                                    )
+                                    .fill(fill)
+                                    .stroke(Stroke::new(1.0_f32, stroke))
+                                    .corner_radius(CornerRadius::same(10))
+                                    .min_size(Vec2::new(tab_w, 28.0)),
+                                )
+                                .clicked()
+                            {
+                                form.active_tab = tab;
+                                if tab == SettingsTab::Memory {
+                                    form.reload_memories();
+                                }
+                            }
+                        }
+                    });
+                }
 
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Voice:").size(12.0).color(TEXT_SOFT));
-                    egui::ComboBox::from_id_salt("setup_voice")
-                        .selected_text(&form.voice)
-                        .show_ui(ui, |ui| {
-                            for v in ["Aoede", "Charon", "Kore", "Fenrir", "Puck"] {
-                                ui.selectable_value(&mut form.voice, v.to_string(), v);
+                ui.add_space(10.0);
+
+                if form.is_settings && form.active_tab == SettingsTab::Memory {
+                    draw_memory_tab(ui, form, max_scroll_h, accent);
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("boogie_setup_scroll")
+                        .max_height(max_scroll_h)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                        // --- Gemini API Key ---
+                        ui.label(RichText::new("Gemini API Key").size(12.0).color(TEXT_SOFT));
+                        ui.horizontal(|ui| {
+                            let key_w = (ui.available_width() - 62.0).max(180.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut form.api_key)
+                                    .password(!form.show_api_key)
+                                    .hint_text("AIza...")
+                                    .desired_width(key_w),
+                            );
+                            ui.checkbox(&mut form.show_api_key, "Show");
+                        });
+
+                        // --- Graphics Performance Tier (Live Preview) ---
+                        ui.add_space(12.0);
+                        ui.label(
+                            RichText::new("Graphics Quality (Orb Performance)")
+                                .size(12.0)
+                                .color(TEXT_SOFT),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let btn_w = ((ui.available_width() - 12.0) / 3.0).max(96.0);
+                            for quality in GraphicsQuality::ALL {
+                                let selected = form.graphics_quality == quality;
+                                let fill = if selected {
+                                    Color32::from_rgba_unmultiplied(
+                                        accent.r(),
+                                        accent.g(),
+                                        accent.b(),
+                                        44,
+                                    )
+                                } else {
+                                    Color32::from_rgba_unmultiplied(255, 255, 255, 10)
+                                };
+                                let stroke_col = if selected {
+                                    Color32::from_rgba_unmultiplied(
+                                        accent.r(),
+                                        accent.g(),
+                                        accent.b(),
+                                        190,
+                                    )
+                                } else {
+                                    Color32::from_rgba_unmultiplied(255, 255, 255, 28)
+                                };
+                                let txt_col = if selected { TEXT_BRIGHT } else { TEXT_SOFT };
+                                let resp = ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(theme::quality_label(quality))
+                                                .size(11.5)
+                                                .color(txt_col)
+                                                .strong(),
+                                        )
+                                        .fill(fill)
+                                        .stroke(Stroke::new(1.0_f32, stroke_col))
+                                        .corner_radius(CornerRadius::same(10))
+                                        .min_size(Vec2::new(btn_w, 30.0)),
+                                    )
+                                    .on_hover_text(theme::quality_description(quality));
+                                if resp.clicked() {
+                                    form.graphics_quality = quality;
+                                }
                             }
                         });
-                });
+                        ui.add_space(3.0);
+                        ui.label(
+                            RichText::new(theme::quality_description(form.graphics_quality))
+                                .size(10.5)
+                                .color(TEXT_MUTED),
+                        );
 
-                ui.add_space(6.0);
-                ui.label(RichText::new("Assistant Name").size(12.0).color(TEXT_SOFT));
-                ui.add(
-                    egui::TextEdit::singleline(&mut form.assistant_name)
-                        .hint_text("Boogie")
-                        .desired_width(f32::INFINITY),
-                );
-
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new("Your Name (optional)")
-                        .size(12.0)
-                        .color(TEXT_SOFT),
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut form.user_name)
-                        .hint_text("Leave blank for default")
-                        .desired_width(f32::INFINITY),
-                );
-
-                if !form.available_inputs.is_empty() {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Mic:").size(12.0).color(TEXT_SOFT));
-                        let sel = if form.input_device.is_empty() {
-                            "System Default"
-                        } else {
-                            form.input_device.as_str()
-                        };
-                        egui::ComboBox::from_id_salt("setup_mic")
-                            .selected_text(truncate_str(sel, 30))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut form.input_device,
-                                    String::new(),
-                                    "System Default",
-                                );
-                                for dev in &form.available_inputs {
-                                    ui.selectable_value(&mut form.input_device, dev.clone(), dev);
+                        // --- Color Theme Presets (Live Preview) ---
+                        ui.add_space(10.0);
+                        let active_pal = ThemePalette::for_theme(form.color_theme);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Color Theme").size(12.0).color(TEXT_SOFT));
+                            ui.label(
+                                RichText::new(format!("· {}", active_pal.display_name))
+                                    .size(11.5)
+                                    .color(active_pal.ui_secondary),
+                            );
+                        });
+                        ui.add_space(4.0);
+                        let chip_w = ((ui.available_width() - 18.0) / 4.0).max(82.0);
+                        for row in ColorTheme::ALL.chunks(4) {
+                            ui.horizontal(|ui| {
+                                for &preset in row {
+                                    let p = ThemePalette::for_theme(preset);
+                                    let selected = form.color_theme == preset;
+                                    if draw_theme_chip(ui, &p, selected, chip_w) {
+                                        form.color_theme = preset;
+                                    }
                                 }
                             });
+                            ui.add_space(4.0);
+                        }
+
+                        // --- Voice & Identity ---
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Voice:").size(12.0).color(TEXT_SOFT));
+                            egui::ComboBox::from_id_salt("setup_voice")
+                                .selected_text(&form.voice)
+                                .show_ui(ui, |ui| {
+                                    for v in ["Aoede", "Charon", "Kore", "Fenrir", "Puck"] {
+                                        ui.selectable_value(&mut form.voice, v.to_string(), v);
+                                    }
+                                });
+                        });
+
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Assistant Name").size(12.0).color(TEXT_SOFT));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.assistant_name)
+                                .hint_text("Boogie")
+                                .desired_width(f32::INFINITY),
+                        );
+
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("Your Name (optional)")
+                                .size(12.0)
+                                .color(TEXT_SOFT),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.user_name)
+                                .hint_text("Leave blank for default")
+                                .desired_width(f32::INFINITY),
+                        );
+
+                        if !form.available_inputs.is_empty() {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Mic:").size(12.0).color(TEXT_SOFT));
+                                let sel = if form.input_device.is_empty() {
+                                    "System Default"
+                                } else {
+                                    form.input_device.as_str()
+                                };
+                                egui::ComboBox::from_id_salt("setup_mic")
+                                    .selected_text(truncate_str(sel, 30))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut form.input_device,
+                                            String::new(),
+                                            "System Default",
+                                        );
+                                        for dev in &form.available_inputs {
+                                            ui.selectable_value(
+                                                &mut form.input_device,
+                                                dev.clone(),
+                                                dev,
+                                            );
+                                        }
+                                    });
+                            });
+                        }
+
+                        if !form.available_outputs.is_empty() {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Speaker:").size(12.0).color(TEXT_SOFT));
+                                let sel = if form.output_device.is_empty() {
+                                    "System Default"
+                                } else {
+                                    form.output_device.as_str()
+                                };
+                                egui::ComboBox::from_id_salt("setup_spk")
+                                    .selected_text(truncate_str(sel, 30))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut form.output_device,
+                                            String::new(),
+                                            "System Default",
+                                        );
+                                        for dev in &form.available_outputs {
+                                            ui.selectable_value(
+                                                &mut form.output_device,
+                                                dev.clone(),
+                                                dev,
+                                            );
+                                        }
+                                    });
+                            });
+                        }
+
+                        ui.add_space(8.0);
+                        ui.checkbox(&mut form.push_to_talk, "Push-to-Talk (hold Space)");
+                        ui.checkbox(&mut form.proactive_audio, "Proactive check-ins");
+                        ui.checkbox(
+                            &mut form.auto_memory_consolidation,
+                            "Auto AI memory summary (Flash-Lite)",
+                        )
+                        .on_hover_text(
+                            "Summarizes long chats & extracts durable facts in the background \
+                             using lightweight gemini-2.5-flash-lite (separate quota, 10m cooldown).",
+                        );
+
+                        ui.add_space(6.0);
+                        let log_path = crate::config::active_config_dir().join("boogie.log");
+                        ui.label(
+                            RichText::new(format!("Log: {}", log_path.display()))
+                                .size(10.0)
+                                .color(TEXT_MUTED)
+                                .family(FontFamily::Monospace),
+                        );
                     });
                 }
 
-                if !form.available_outputs.is_empty() {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Speaker:").size(12.0).color(TEXT_SOFT));
-                        let sel = if form.output_device.is_empty() {
-                            "System Default"
-                        } else {
-                            form.output_device.as_str()
-                        };
-                        egui::ComboBox::from_id_salt("setup_spk")
-                            .selected_text(truncate_str(sel, 30))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut form.output_device,
-                                    String::new(),
-                                    "System Default",
-                                );
-                                for dev in &form.available_outputs {
-                                    ui.selectable_value(&mut form.output_device, dev.clone(), dev);
-                                }
-                            });
-                    });
-                }
-
-                ui.add_space(8.0);
-                ui.checkbox(&mut form.push_to_talk, "Push-to-Talk (hold Space)");
-                ui.checkbox(&mut form.proactive_audio, "Proactive check-ins");
-
-                ui.add_space(6.0);
-                let log_path = crate::config::active_config_dir().join("boogie.log");
-                ui.label(
-                    RichText::new(format!("Log: {}", log_path.display()))
-                        .size(10.0)
-                        .color(TEXT_MUTED)
-                        .family(FontFamily::Monospace),
-                );
-
-                ui.add_space(14.0);
+                ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     let save_label = if form.is_settings {
                         "Save & Apply"
@@ -1820,7 +2200,7 @@ impl BoogieGui {
                                     .color(BG_OBSIDIAN)
                                     .strong(),
                             )
-                            .fill(CYAN)
+                            .fill(accent)
                             .corner_radius(CornerRadius::same(14))
                             .min_size(Vec2::new(140.0, 36.0)),
                         )
@@ -1832,6 +2212,8 @@ impl BoogieGui {
                         } else {
                             let mut cfg = form.base_config.clone();
                             cfg.gemini_api_key = key;
+                            cfg.graphics_quality = Some(form.graphics_quality.as_str().to_string());
+                            cfg.color_theme = Some(form.color_theme.as_str().to_string());
                             cfg.voice = Some(form.voice.clone());
                             cfg.assistant_name = if form.assistant_name.trim().is_empty() {
                                 None
@@ -1855,6 +2237,7 @@ impl BoogieGui {
                             };
                             cfg.push_to_talk = Some(form.push_to_talk);
                             cfg.proactive_audio = Some(form.proactive_audio);
+                            cfg.auto_memory_consolidation = Some(form.auto_memory_consolidation);
                             if !form.is_settings && cfg.dashboard_enabled.is_none() {
                                 cfg.dashboard_enabled = Some(false);
                             }
@@ -1889,6 +2272,8 @@ impl BoogieGui {
             });
 
         if let Some(cfg) = submitted_cfg {
+            self.graphics_quality = cfg.graphics_quality();
+            self.color_theme = cfg.color_theme();
             self.current_cfg = Some(cfg.clone());
             self.push_to_talk = cfg.push_to_talk();
             self.ptt_holding = false;
@@ -1939,8 +2324,9 @@ impl eframe::App for BoogieGui {
         self.metrics.refresh();
         self.update_animations(ctx, dt);
 
-        // Smooth 60fps loop for fluid 3D liquid glass animation
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        // Adaptive repaint cadence by graphics tier (30 / 45 / 60 FPS)
+        let frame_ms = theme::quality_frame_interval_ms(self.active_quality());
+        ctx.request_repaint_after(std::time::Duration::from_millis(frame_ms));
 
         let screen = ctx.screen_rect();
         self.handle_frameless_resize(ctx, screen);
@@ -2026,7 +2412,315 @@ enum WinBtnKind {
     Close,
 }
 
-fn draw_win_button(ui: &mut egui::Ui, rect: Rect, id: &str, kind: WinBtnKind) -> bool {
+fn draw_memory_tab(ui: &mut egui::Ui, form: &mut SetupForm, max_scroll_h: f32, accent: Color32) {
+    ui.horizontal(|ui| {
+        let search_w = (ui.available_width() - 68.0).max(180.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut form.memory_filter)
+                .hint_text("Search facts & sessions...")
+                .desired_width(search_w),
+        );
+        if ui
+            .add(
+                egui::Button::new(RichText::new("Refresh").size(11.0).color(TEXT_SOFT))
+                    .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 12))
+                    .corner_radius(CornerRadius::same(8))
+                    .min_size(Vec2::new(60.0, 24.0)),
+            )
+            .clicked()
+        {
+            form.reload_memories();
+        }
+    });
+    ui.add_space(8.0);
+
+    let filter_folded = crate::memory::fold_vietnamese(form.memory_filter.trim());
+    let mut forget_target: Option<(String, String)> = None;
+    let mut delete_session_rev_idx: Option<usize> = None;
+
+    egui::ScrollArea::vertical()
+        .id_salt("boogie_memory_scroll")
+        .max_height((max_scroll_h - 68.0).max(180.0))
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+
+            ui.label(
+                RichText::new(format!("STORED FACTS ({})", form.memory_rows.len()))
+                    .size(10.0)
+                    .color(accent)
+                    .family(FontFamily::Monospace),
+            );
+            ui.add_space(4.0);
+
+            let mut shown_facts = 0usize;
+            for row in &form.memory_rows {
+                if !filter_folded.is_empty() {
+                    let hay = crate::memory::fold_vietnamese(&format!(
+                        "{} {} {}",
+                        row.category, row.key, row.entry.value
+                    ));
+                    if !hay.contains(&filter_folded) {
+                        continue;
+                    }
+                }
+                shown_facts += 1;
+                egui::Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 8))
+                    .stroke(Stroke::new(
+                        1.0_f32,
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+                    ))
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(egui::Margin::symmetric(10, 7))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("{}/{}", row.category, row.key))
+                                    .size(10.5)
+                                    .color(accent)
+                                    .family(FontFamily::Monospace),
+                            );
+                            if !row.entry.updated_at.is_empty() {
+                                let d =
+                                    row.entry.updated_at.split_whitespace().next().unwrap_or("");
+                                ui.label(RichText::new(d).size(9.5).color(TEXT_MUTED));
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("×").size(12.0).color(CRIMSON),
+                                            )
+                                            .fill(Color32::TRANSPARENT)
+                                            .min_size(Vec2::new(20.0, 18.0)),
+                                        )
+                                        .on_hover_text("Delete this memory")
+                                        .clicked()
+                                    {
+                                        forget_target =
+                                            Some((row.category.clone(), row.key.clone()));
+                                    }
+                                },
+                            );
+                        });
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&row.entry.value)
+                                    .size(12.0)
+                                    .color(TEXT_BRIGHT),
+                            )
+                            .wrap(),
+                        );
+                    });
+                ui.add_space(4.0);
+            }
+
+            if shown_facts == 0 {
+                ui.label(
+                    RichText::new("No matching facts stored yet.")
+                        .size(11.5)
+                        .color(TEXT_MUTED),
+                );
+            }
+
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(format!("PAST SESSIONS ({})", form.recent_sessions.len()))
+                    .size(10.0)
+                    .color(accent)
+                    .family(FontFamily::Monospace),
+            );
+            ui.add_space(4.0);
+
+            let mut shown_sessions = 0usize;
+            for (rev_idx, sess) in form.recent_sessions.iter().rev().enumerate() {
+                if !filter_folded.is_empty() {
+                    let hay = crate::memory::fold_vietnamese(&format!(
+                        "{} {} {}",
+                        sess.date,
+                        sess.topics.join(" "),
+                        sess.summary
+                    ));
+                    if !hay.contains(&filter_folded) {
+                        continue;
+                    }
+                }
+                shown_sessions += 1;
+                egui::Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 7))
+                    .stroke(Stroke::new(
+                        1.0_f32,
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 16),
+                    ))
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(egui::Margin::symmetric(10, 7))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let badge = if sess.ai_summarized { "AI · " } else { "" };
+                            ui.label(
+                                RichText::new(format!("{badge}{}", sess.date))
+                                    .size(10.0)
+                                    .color(TEXT_SOFT)
+                                    .family(FontFamily::Monospace),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("×").size(12.0).color(CRIMSON),
+                                            )
+                                            .fill(Color32::TRANSPARENT)
+                                            .min_size(Vec2::new(20.0, 18.0)),
+                                        )
+                                        .on_hover_text("Delete this session summary")
+                                        .clicked()
+                                    {
+                                        delete_session_rev_idx = Some(rev_idx);
+                                    }
+                                },
+                            );
+                        });
+                        if !sess.topics.is_empty() {
+                            ui.label(
+                                RichText::new(sess.topics.join(" · "))
+                                    .size(10.0)
+                                    .color(accent),
+                            );
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(truncate_str(&sess.summary, 220))
+                                    .size(11.5)
+                                    .color(TEXT_BRIGHT),
+                            )
+                            .wrap(),
+                        );
+                    });
+                ui.add_space(4.0);
+            }
+
+            if shown_sessions == 0 {
+                ui.label(
+                    RichText::new("No past sessions recorded yet.")
+                        .size(11.5)
+                        .color(TEXT_MUTED),
+                );
+            }
+        });
+
+    if let Some((cat, key)) = forget_target {
+        let _ = crate::memory::forget_memory(Some(&cat), Some(&key), None);
+        form.reload_memories();
+    }
+    if let Some(rev_idx) = delete_session_rev_idx {
+        let _ = crate::memory::delete_session_by_index(rev_idx);
+        form.reload_memories();
+    }
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let clear_label = if form.confirm_clear_memory {
+            "Click again to wipe all memory"
+        } else {
+            "Clear All Memory"
+        };
+        if ui
+            .add(
+                egui::Button::new(RichText::new(clear_label).size(11.0).color(CRIMSON))
+                    .fill(Color32::from_rgba_unmultiplied(
+                        CRIMSON.r(),
+                        CRIMSON.g(),
+                        CRIMSON.b(),
+                        if form.confirm_clear_memory { 44 } else { 18 },
+                    ))
+                    .stroke(Stroke::new(
+                        1.0_f32,
+                        Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 95),
+                    ))
+                    .corner_radius(CornerRadius::same(10))
+                    .min_size(Vec2::new(130.0, 26.0)),
+            )
+            .clicked()
+        {
+            if form.confirm_clear_memory {
+                let _ = crate::memory::clear_all_memory();
+                form.reload_memories();
+            } else {
+                form.confirm_clear_memory = true;
+            }
+        }
+    });
+}
+
+fn draw_theme_chip(ui: &mut egui::Ui, pal: &ThemePalette, selected: bool, width: f32) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::click());
+    let resp = resp.on_hover_text(pal.display_name);
+    let painter = ui.painter();
+
+    let fill = if selected {
+        Color32::from_rgba_unmultiplied(
+            pal.ui_secondary.r(),
+            pal.ui_secondary.g(),
+            pal.ui_secondary.b(),
+            36,
+        )
+    } else if resp.hovered() {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 18)
+    } else {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 9)
+    };
+    let border_col = if selected {
+        Color32::from_rgba_unmultiplied(
+            pal.ui_secondary.r(),
+            pal.ui_secondary.g(),
+            pal.ui_secondary.b(),
+            195,
+        )
+    } else if resp.hovered() {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 58)
+    } else {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 24)
+    };
+
+    painter.rect_filled(rect, CornerRadius::same(10), fill);
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(10),
+        Stroke::new(1.0_f32, border_col),
+        egui::StrokeKind::Inside,
+    );
+
+    // 3 miniature glowing color swatch dots
+    let cy = rect.center().y;
+    let dot_start_x = rect.left() + 10.0;
+    for (idx, &sw) in pal.swatches.iter().enumerate() {
+        let cx = dot_start_x + idx as f32 * 6.5;
+        painter.circle_filled(Pos2::new(cx, cy), 3.2, sw);
+    }
+
+    painter.text(
+        Pos2::new(dot_start_x + 21.0, cy),
+        Align2::LEFT_CENTER,
+        pal.short_name,
+        FontId::new(10.5, FontFamily::Proportional),
+        if selected { TEXT_BRIGHT } else { TEXT_SOFT },
+    );
+
+    resp.clicked()
+}
+
+fn draw_win_button(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    id: &str,
+    kind: WinBtnKind,
+    accent: Color32,
+) -> bool {
     let mut resp = ui.interact(rect, ui.id().with(id), Sense::click());
     if matches!(kind, WinBtnKind::Settings(_)) {
         resp = resp.on_hover_text("Settings");
@@ -2040,7 +2734,7 @@ fn draw_win_button(ui: &mut egui::Ui, rect: Rect, id: &str, kind: WinBtnKind) ->
                 Color32::from_rgba_unmultiplied(CRIMSON.r(), CRIMSON.g(), CRIMSON.b(), 190)
             }
             WinBtnKind::Settings(true) => {
-                Color32::from_rgba_unmultiplied(CYAN.r(), CYAN.g(), CYAN.b(), 36)
+                Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 36)
             }
             _ => Color32::from_rgba_unmultiplied(255, 255, 255, 22),
         };
@@ -2049,7 +2743,7 @@ fn draw_win_button(ui: &mut egui::Ui, rect: Rect, id: &str, kind: WinBtnKind) ->
 
     let c = rect.center();
     let fg = if is_active {
-        CYAN
+        accent
     } else if resp.hovered() {
         TEXT_BRIGHT
     } else {
@@ -2142,6 +2836,13 @@ fn draw_transcript_icon(painter: &egui::Painter, c: Pos2, col: Color32) {
 fn exp_lerp(current: f32, target: f32, speed: f32, dt: f32) -> f32 {
     let factor = 1.0 - (-speed * dt).exp();
     current + (target - current) * factor
+}
+
+fn exp_lerp_rgb(current: &mut [f32; 3], target: [f32; 3], speed: f32, dt: f32) {
+    let factor = 1.0 - (-speed * dt).exp();
+    for i in 0..3 {
+        current[i] += (target[i] - current[i]) * factor;
+    }
 }
 
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -2350,9 +3051,19 @@ pub fn run_gui(
         viewport = viewport.with_icon(Arc::new(icon));
     }
 
+    let multisampling = match initial_cfg
+        .as_ref()
+        .map(ApiConfig::graphics_quality)
+        .unwrap_or_default()
+    {
+        GraphicsQuality::Low => 0,
+        GraphicsQuality::Medium => 2,
+        GraphicsQuality::High => 4,
+    };
+
     let options = eframe::NativeOptions {
         viewport,
-        multisampling: 4,
+        multisampling,
         ..Default::default()
     };
 

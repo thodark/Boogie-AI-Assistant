@@ -51,9 +51,10 @@ You do **not** need Rust, Cargo, Python, or any runtime to try Boogie. Download 
    > **Windows SmartScreen notice:** Because this open-source binary is not yet signed with a paid EV code-signing certificate, Windows Defender SmartScreen may display *"Windows protected your PC"*. Verify the SHA-256 checksum below, then click **More info → Run anyway**.
 3. **Complete the built-in Setup screen:** On first launch, Boogie automatically opens **BOOGIE SETUP — Connect Gemini Live API**:
    - Paste your `AIza...` key into **Gemini API Key** (use **Show** if you want to verify it).
+   - Pick your **Graphics Quality** (`Low (Lite)` for weak/integrated GPUs, `Medium`, or `High (Ultra)`) and **Color Theme** (8 presets with live preview behind the modal).
    - *(Optional)* Choose a **Voice** (`Aoede`, `Charon`, `Kore`, `Fenrir`, `Puck`), set **Assistant Name** / **Your Name**, pick your **Mic** & **Speaker**, or toggle **Push-to-Talk (hold Space)** and **Proactive check-ins**.
    - Click **Save & Connect**. Boogie saves `config/api_keys.json` locally next to `boogie.exe` and starts listening immediately. Your API key stays on your PC and is only sent directly to Google's Gemini Live endpoint.
-4. **Edit settings anytime:** Click the top-right **Settings** gear icon to update your API key, voice, audio devices, or Push-to-Talk live — no restart or manual JSON editing required.
+4. **Edit settings anytime:** Click the top-right **Settings** gear icon to live-preview and hot-reload your graphics tier, color theme, API key, voice, audio devices, or Push-to-Talk — no restart or manual JSON editing required.
 
 <details>
 <summary><strong>Advanced: Manual JSON Configuration & Runtime Logs</strong></summary>
@@ -75,7 +76,11 @@ To pre-configure manually without using the Setup modal, copy `config/api_keys.e
   "output_device": "",
   "push_to_talk": false,
   "proactive_audio": true,
-  "dashboard_enabled": false
+  "dashboard_enabled": false,
+  "graphics_quality": "high",
+  "color_theme": "obsidian",
+  "auto_memory_consolidation": true,
+  "memory_model": "gemini-2.5-flash-lite"
 }
 ```
 
@@ -104,7 +109,7 @@ Get-FileHash .\boogie.exe -Algorithm SHA256
 
 ## Why Rust? — Blazing Fast Startup & Tiny RAM Footprint
 
-Boogie was rewritten from the ground up in **pure Rust** to eliminate interpreter overhead, PyQt/Chromium bloat, and sluggish cold starts — while delivering a **60 FPS raymarched 3D GPU interface**, **real-time screen vision**, and **42 native Windows automation tools** inside a single self-contained `.exe`.
+Boogie was rewritten from the ground up in **pure Rust** to eliminate interpreter overhead, PyQt/Chromium bloat, and sluggish cold starts — while delivering a **60 FPS raymarched 3D GPU interface**, **real-time screen vision**, and **43 native Windows automation tools** inside a single self-contained `.exe`.
 
 ### Visual Performance Comparison
 
@@ -163,10 +168,10 @@ Instead of chaining three slow stages (**Speech-to-Text → Chat LLM → Text-to
 
 ## Key Features
 
-### 1. Real-Time 3D Liquid Glass / Ferrofluid Orb (`orb_shader.rs`)
-- **Pure OpenGL GLSL Raymarching** directly inside `eframe::glow` — zero heavy 3D engine bloat.
-- **Audio & Viseme Reactive:** Real-time FFT speech analysis (`dsp.rs` — energy level, vowel openness, and formant width) drives liquid surface waves and internal refracted plasma ribbons at 60 FPS.
-- **Smooth State Morphing:** Fluidly blends palette, turbulence, and 3D tilted orbital ring across `Listening` (Violet/Cyan), `Speaking` (Cyan/Mint), `Thinking` (Violet/Amber), `Sleeping`, and `Muted`.
+### 1. Real-Time 3D Liquid Glass / Ferrofluid Orb (`orb_shader.rs`, `theme.rs`)
+- **Pure OpenGL GLSL Shaders with 3 Performance Tiers:** Choose **High (Ultra)** (60 FPS, 64-step 3D raymarching), **Medium** (45 FPS, 28-step balanced raymarching, ~3–4× lighter), or **Low (Lite)** (30 FPS analytical 3D Liquid Glass sphere with live ripples, plasma core & orbital ring — ~15× lighter for weak/integrated GPUs) right in Setup or Settings with instant live preview.
+- **8 Curated Color Themes:** Switch live between **Neon Obsidian**, **Aurora Prism** (animated iridescent rainbow), **Cyber Sakura**, **Solar Flare**, **Emerald Pulse**, **Arctic Frost**, **Crimson Phantom**, and **Vaporwave Neon** — tinting both the 3D orb and the entire Obsidian UI smoothly.
+- **Audio & Viseme Reactive:** Real-time FFT speech analysis (`dsp.rs` — energy level, vowel openness, and formant width) drives liquid surface waves and internal refracted plasma ribbons.
 - **Interactive 3D:** Subtle cursor parallax tilts lighting and camera; clicking the orb triggers a liquid energy pulse.
 
 ### 2. Modern Frameless Obsidian UI (`gui.rs`)
@@ -181,7 +186,7 @@ Instead of chaining three slow stages (**Speech-to-Text → Chat LLM → Text-to
 - **Native App Launcher (`open_app.rs`) & Fast Browser Control (`browser.rs`):** Resolves & focuses/launches any installed Windows app via Win32 window enumeration, Start Menu `.lnk` shortcuts, Windows Registry `App Paths`, `PATH`, URI schemes, and UWP `Get-StartApps`; opens URLs directly in your default or requested browser (`brave`, `chrome`, `edge`, `firefox`) without hanging.
 - **Real Screen & Browser Vision (`screen_process`, `browser_control` `screenshot`):** Captures monitors or Chromium pages, resizes to `≤1280px` JPEG, and streams directly into Gemini Live `realtimeInput.video`.
 
-### 4. Security-First Automation (42 Native Windows Tools)
+### 4. Security-First Automation (43 Native Windows Tools)
 - **Permission Tiers & Confirmation Gate (`confirm.rs`):**
   - `run_command` auto-runs only a strict read-only single-command allowlist (blocking shell chaining `&&`, `;`, `|`, `>`); all mutating commands require on-screen approval.
   - `send_message`, `kill_process` (exact match + numeric PID + protected system process blocklist), `write_file`, `delete_file`, `move_file`, and destructive `computer_settings` require explicit confirmation with request-ID matching (no stale approvals).
@@ -209,6 +214,13 @@ flowchart LR
 ---
 
 ## Changelog
+
+### [`v0.2.0`](https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.2.0) — 2026-11-23
+- **3 Graphics Quality Tiers (Low / Medium / High):** Selectable on first-run Setup and anytime in Settings with instant live preview and adaptive FPS (`30` / `45` / `60 FPS`) + adaptive MSAA (`0x` / `2x` / `4x`). **Low (Lite)** uses a zero-loop analytical 3D glass shader (~15× lighter for weak/integrated GPUs) while keeping ripples, refracted plasma glow, speculars, and the 3D orbital ring.
+- **Hoisted Shader Optimizations:** Precomputes per-frame rotation matrices outside the raymarch loop across Medium & High tiers and compiles each tier lazily on demand for zero cold-boot penalty.
+- **8 Live-Preview Color Themes:** Added **Neon Obsidian**, **Aurora Prism** (iridescent rainbow), **Cyber Sakura**, **Solar Flare**, **Emerald Pulse**, **Arctic Frost**, **Crimson Phantom**, and **Vaporwave Neon** — smoothly morphing both the 3D orb and UI accents (status pill, 14-bar dock spectrum, chat bubbles, modals).
+- **Smart Long-Term Memory Engine (`memory.rs`) & Memory Manager UI:** Vietnamese diacritic-folding multi-word search across both saved facts (`memory.json`) and episodic history (`long_term.json`), `forget_memory` tool, importance/recency metadata, atomic JSON writes, budgeted `[MEMORY]` + `[ALSO REMEMBERED]` prompt injection, safe flush on window close, guarded background AI consolidation (`gemini-2.5-flash-lite`, 10m cooldown, separate quota bucket), and an in-app **Memory** tab in Settings to inspect/delete stored memories.
+- **Warmer, Witter Conversational Voice (`core/prompt.txt`):** Preserves Boogie's crisp JARVIS-style competence on tasks while opening up natural humor, playful banter, and genuine empathy during casual chats and heart-to-heart talks.
 
 ### [`v0.1.0`](https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.1.0) — 2026-11-22
 - **First prebuilt Windows x64 release:** Ships `Boogie-Windows-x64.zip`, standalone `boogie.exe`, and automated `SHA256SUMS.txt` via GitHub Actions.
@@ -274,13 +286,15 @@ GitHub Actions runs formatting, strict Clippy (`-D warnings`), and the full unit
 └── src/
     ├── main.rs                 # Supervisor, non-blocking tool worker & session loop
     ├── gui.rs                  # Frameless Obsidian UI, onboarding, captions, drawer & dock
-    ├── orb_shader.rs           # 60 FPS 3D Liquid Glass / Ferrofluid GLSL shader
+    ├── orb_shader.rs           # 3-tier GLSL 3D Liquid Glass orb shader (Low/Medium/High)
+    ├── theme.rs                # 8 color theme palettes & graphics tier profiles
     ├── gemini.rs               # Gemini Live API WebSocket client (audio + vision)
     ├── audio.rs                # Multi-format WASAPI audio + instant Clear playback
     ├── dsp.rs                  # RMS energy & FFT viseme extraction (rustfft)
     ├── echo.rs                 # Speaker-aware echo guard + hangover + audioStreamEnd
     ├── confirm.rs              # Permission tiers, confirm gate & audit logger
-    ├── config.rs               # Multi-path config loader, prompt & session memory
+    ├── config.rs               # Multi-path config loader & prompt assembly
+    ├── memory.rs               # Smart Vietnamese search, episodic history & AI consolidation
     ├── proactive.rs            # Proactive check-in engine
     ├── dashboard.rs            # Authenticated local Axum WS server (off by default)
     ├── tools.rs                # Tool registry, vision frames & untrusted tagging

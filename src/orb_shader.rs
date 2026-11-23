@@ -1,5 +1,7 @@
 use eframe::glow::{self, HasContext};
 
+use crate::config::GraphicsQuality;
+
 #[derive(Clone, Copy, Debug)]
 pub struct OrbUniforms {
     pub time: f32,
@@ -12,11 +14,17 @@ pub struct OrbUniforms {
     pub mouse: [f32; 2],
     pub muted: f32,
     pub pulse: f32,
+    pub quality: GraphicsQuality,
+    pub col_primary: [f32; 3],
+    pub col_secondary: [f32; 3],
+    pub col_accent: [f32; 3],
+    pub bg_center: [f32; 3],
+    pub bg_edge: [f32; 3],
+    pub rainbow: f32,
 }
 
-pub struct OrbRenderer {
+struct TierProgram {
     program: glow::Program,
-    vao: glow::VertexArray,
     u_viewport_origin: Option<glow::UniformLocation>,
     u_resolution: Option<glow::UniformLocation>,
     u_time: Option<glow::UniformLocation>,
@@ -29,6 +37,18 @@ pub struct OrbRenderer {
     u_mouse: Option<glow::UniformLocation>,
     u_muted: Option<glow::UniformLocation>,
     u_pulse: Option<glow::UniformLocation>,
+    u_col_primary: Option<glow::UniformLocation>,
+    u_col_secondary: Option<glow::UniformLocation>,
+    u_col_accent: Option<glow::UniformLocation>,
+    u_bg_center: Option<glow::UniformLocation>,
+    u_bg_edge: Option<glow::UniformLocation>,
+    u_rainbow: Option<glow::UniformLocation>,
+}
+
+pub struct OrbRenderer {
+    is_es: bool,
+    vao: glow::VertexArray,
+    tiers: [Option<TierProgram>; 3],
 }
 
 const VERT_BODY: &str = r#"
@@ -57,6 +77,12 @@ uniform vec4  u_state_weights; // x: listening, y: speaking, z: thinking, w: sle
 uniform vec2  u_mouse;
 uniform float u_muted;
 uniform float u_pulse;
+uniform vec3  u_col_primary;
+uniform vec3  u_col_secondary;
+uniform vec3  u_col_accent;
+uniform vec3  u_bg_center;
+uniform vec3  u_bg_edge;
+uniform float u_rainbow;
 
 // --- Math helpers ---
 
@@ -76,55 +102,12 @@ float gyroid(vec3 p) {
     return dot(sin(p), cos(p.yzx));
 }
 
-// Smooth organic 3D displacement field (Lipschitz-controlled for clean raymarching)
-float liquidField(vec3 p, float t, float speed, float voiceAmp, float openAmp) {
-    vec3 q1 = p;
-    q1.xz = rot2(t * 0.28 * speed) * q1.xz;
-    q1.xy = rot2(t * 0.17 * speed) * q1.xy;
-
-    vec3 q2 = p;
-    q2.yz = rot2(-t * 0.42 * speed) * q2.yz;
-    q2.xz = rot2(t * 0.31 * speed) * q2.xz;
-
-    float g1 = gyroid(q1 * 2.35 + vec3(0.0, t * 0.48 * speed, t * 0.32 * speed));
-    float g2 = gyroid(q2 * 4.55 - vec3(t * 0.72 * speed, 0.0, t * 0.54 * speed));
-    float g3 = gyroid(q1 * 7.80 + vec3(t * 1.15, -t * 0.92, t * 0.65));
-
-    float thinkBoost = u_state_weights.z;
-    float sleepCalm  = u_state_weights.w;
-    float muteCalm   = u_muted;
-
-    float calmFactor = 1.0 - 0.55 * sleepCalm - 0.35 * muteCalm;
-
-    float a1 = (0.048 + 0.032 * thinkBoost + voiceAmp * 0.068 + u_pulse * 0.055) * calmFactor;
-    float a2 = (0.015 + 0.018 * thinkBoost + voiceAmp * 0.044 + openAmp * 0.032) * calmFactor;
-    float a3 = (0.004 + voiceAmp * 0.014 + openAmp * 0.010) * calmFactor;
-
-    return g1 * a1 + g2 * a2 + g3 * a3;
-}
-
-float mapOrb(vec3 p, float t, float speed, float voiceAmp, float openAmp) {
-    // Subtle speech-width elastic morphing
-    vec3 q = p;
-    float stretch = u_width * (0.035 + 0.055 * voiceAmp);
-    q.x *= 1.0 - stretch;
-    q.y *= 1.0 + stretch * 0.65;
-
-    float breath = sin(t * 1.45) * 0.022 + sin(t * 0.63 + 1.2) * 0.010;
-    float baseR  = 0.86 + breath + voiceAmp * 0.075 + openAmp * 0.040 + u_pulse * 0.05;
-    float disp   = liquidField(q, t, speed, voiceAmp, openAmp);
-
-    return length(q) - baseR - disp;
-}
-
-vec3 calcNormal(vec3 p, float t, float speed, float voiceAmp, float openAmp) {
-    vec2 e = vec2(0.0022, -0.0022);
-    return normalize(
-        e.xyy * mapOrb(p + e.xyy, t, speed, voiceAmp, openAmp) +
-        e.yyx * mapOrb(p + e.yyx, t, speed, voiceAmp, openAmp) +
-        e.yxy * mapOrb(p + e.yxy, t, speed, voiceAmp, openAmp) +
-        e.xxx * mapOrb(p + e.xxx, t, speed, voiceAmp, openAmp)
-    );
+// Fast luminance-preserving hue rotation around (1,1,1) for rainbow/prismatic themes
+vec3 hueShift(vec3 col, float angle) {
+    const vec3 k = vec3(0.57735027);
+    float c = cos(angle);
+    float s = sin(angle);
+    return max(col * c + cross(k, col) * s + k * dot(k, col) * (1.0 - c), vec3(0.0));
 }
 
 // Iridescent thin-film cosine palette
@@ -133,6 +116,87 @@ vec3 iridescence(float x, vec3 primary, vec3 secondary, vec3 accent) {
     vec3 raw = 0.5 + 0.5 * cos(6.28318 * (x + phase));
     vec3 tinted = primary * raw.r + secondary * raw.g + accent * raw.b;
     return mix(raw, tinted, 0.78);
+}
+
+#if QUALITY_TIER >= 1
+// Precomputed per-pixel rotation matrices (avoids trig calls inside the raymarch loop)
+struct FieldCtx {
+    mat2 m1xz;
+    mat2 m1xy;
+    mat2 m2yz;
+    mat2 m2xz;
+    vec3 off1;
+    vec3 off2;
+    vec3 off3;
+    float a1;
+    float a2;
+    float a3;
+    float stretchX;
+    float stretchY;
+    float baseR;
+};
+
+FieldCtx makeFieldCtx(float t, float speed, float voiceAmp, float openAmp) {
+    FieldCtx ctx;
+    ctx.m1xz = rot2(t * 0.28 * speed);
+    ctx.m1xy = rot2(t * 0.17 * speed);
+    ctx.m2yz = rot2(-t * 0.42 * speed);
+    ctx.m2xz = rot2(t * 0.31 * speed);
+    ctx.off1 = vec3(0.0, t * 0.48 * speed, t * 0.32 * speed);
+    ctx.off2 = vec3(t * 0.72 * speed, 0.0, t * 0.54 * speed);
+    ctx.off3 = vec3(t * 1.15, -t * 0.92, t * 0.65);
+
+    float thinkBoost = u_state_weights.z;
+    float calmFactor = 1.0 - 0.55 * u_state_weights.w - 0.35 * u_muted;
+
+    ctx.a1 = (0.048 + 0.032 * thinkBoost + voiceAmp * 0.068 + u_pulse * 0.055) * calmFactor;
+    ctx.a2 = (0.015 + 0.018 * thinkBoost + voiceAmp * 0.044 + openAmp * 0.032) * calmFactor;
+    ctx.a3 = (0.004 + voiceAmp * 0.014 + openAmp * 0.010) * calmFactor;
+
+    float stretch = u_width * (0.035 + 0.055 * voiceAmp);
+    ctx.stretchX = 1.0 - stretch;
+    ctx.stretchY = 1.0 + stretch * 0.65;
+
+    float breath = sin(t * 1.45) * 0.022 + sin(t * 0.63 + 1.2) * 0.010;
+    ctx.baseR = 0.86 + breath + voiceAmp * 0.075 + openAmp * 0.040 + u_pulse * 0.05;
+    return ctx;
+}
+
+float liquidField(vec3 p, FieldCtx ctx) {
+    vec3 q1 = p;
+    q1.xz = ctx.m1xz * q1.xz;
+    q1.xy = ctx.m1xy * q1.xy;
+
+    vec3 q2 = p;
+    q2.yz = ctx.m2yz * q2.yz;
+    q2.xz = ctx.m2xz * q2.xz;
+
+    float g1 = gyroid(q1 * 2.35 + ctx.off1);
+    float g2 = gyroid(q2 * 4.55 - ctx.off2);
+#if QUALITY_TIER >= 2
+    float g3 = gyroid(q1 * 7.80 + ctx.off3);
+    return g1 * ctx.a1 + g2 * ctx.a2 + g3 * ctx.a3;
+#else
+    return g1 * ctx.a1 + g2 * ctx.a2;
+#endif
+}
+
+float mapOrb(vec3 p, FieldCtx ctx) {
+    vec3 q = p;
+    q.x *= ctx.stretchX;
+    q.y *= ctx.stretchY;
+    float disp = liquidField(q, ctx);
+    return length(q) - ctx.baseR - disp;
+}
+
+vec3 calcNormal(vec3 p, FieldCtx ctx) {
+    vec2 e = vec2(0.0024, -0.0024);
+    return normalize(
+        e.xyy * mapOrb(p + e.xyy, ctx) +
+        e.yyx * mapOrb(p + e.yyx, ctx) +
+        e.yxy * mapOrb(p + e.yxy, ctx) +
+        e.xxx * mapOrb(p + e.xxx, ctx)
+    );
 }
 
 // Subtle procedural cosmic dust motes (proper 2D cell hash, zero banding/stripes)
@@ -156,6 +220,7 @@ float starLayer(vec2 uv, float scale, float t, float seedOffset) {
     float halo = exp(-d * 18.0) * 0.22;
     return (core + halo) * twinkle * smoothstep(0.78, 0.99, h);
 }
+#endif
 
 // Filmic ACES tonemap
 vec3 aces(vec3 x) {
@@ -176,31 +241,17 @@ void main() {
     float t = u_time;
     vec4 w = u_state_weights;
 
-    // --- Curated Obsidian + Violet-Cyan Neon State Palettes (Linear RGB) ---
-    vec3 pListen = vec3(0.42, 0.18, 0.98);
-    vec3 sListen = vec3(0.06, 0.84, 0.98);
-    vec3 aListen = vec3(0.84, 0.24, 0.90);
+    vec3 colPrimary   = u_col_primary;
+    vec3 colSecondary = u_col_secondary;
+    vec3 colAccent    = u_col_accent;
 
-    vec3 pSpeak  = vec3(0.04, 0.82, 0.96);
-    vec3 sSpeak  = vec3(0.14, 0.98, 0.74);
-    vec3 aSpeak  = vec3(0.54, 0.28, 1.00);
-
-    vec3 pThink  = vec3(0.64, 0.16, 0.96);
-    vec3 sThink  = vec3(1.00, 0.52, 0.16);
-    vec3 aThink  = vec3(0.98, 0.22, 0.62);
-
-    vec3 pSleep  = vec3(0.20, 0.14, 0.48);
-    vec3 sSleep  = vec3(0.12, 0.36, 0.56);
-    vec3 aSleep  = vec3(0.36, 0.24, 0.62);
-
-    vec3 colPrimary   = pListen * w.x + pSpeak * w.y + pThink * w.z + pSleep * w.w;
-    vec3 colSecondary = sListen * w.x + sSpeak * w.y + sThink * w.z + sSleep * w.w;
-    vec3 colAccent    = aListen * w.x + aSpeak * w.y + aThink * w.z + aSleep * w.w;
-
-    // Subtle crimson-rose shift when mic is muted
-    vec3 muteTint = vec3(0.82, 0.14, 0.34);
-    colPrimary   = mix(colPrimary,   mix(colPrimary, muteTint, 0.58), u_muted);
-    colSecondary = mix(colSecondary, vec3(0.42, 0.22, 0.52), u_muted * 0.65);
+    // Smooth prismatic spectrum cycling for rainbow/vaporwave presets
+    if (u_rainbow > 0.001) {
+        float shift = t * 0.52 * u_rainbow;
+        colPrimary   = mix(colPrimary,   hueShift(colPrimary,   shift),            u_rainbow);
+        colSecondary = mix(colSecondary, hueShift(colSecondary, shift * 1.15 + 0.7), u_rainbow);
+        colAccent    = mix(colAccent,    hueShift(colAccent,    shift * 0.85 + 1.5), u_rainbow);
+    }
 
     float speed = 0.85 * w.x + 1.35 * w.y + 1.75 * w.z + 0.38 * w.w;
     speed = mix(speed, 0.45, u_muted * 0.6);
@@ -208,30 +259,33 @@ void main() {
     float voiceAmp = clamp(u_audio * (1.0 - 0.7 * u_muted), 0.0, 1.0);
     float openAmp  = clamp(u_openness * (1.0 - 0.7 * u_muted), 0.0, 1.0);
 
-    // --- 1. Deep Obsidian Atmospheric Backdrop ---
+    // --- 1. Deep Atmospheric Backdrop ---
     float radial = length(p);
-    vec3 bg = mix(
-        vec3(0.016, 0.012, 0.036),
-        vec3(0.005, 0.004, 0.014),
-        smoothstep(0.0, 2.35, radial)
-    );
+    vec3 bg = mix(u_bg_center, u_bg_edge, smoothstep(0.0, 2.35, radial));
 
     // Slow volumetric aurora lobes behind the orb
     vec2 lobe1 = p - vec2(-0.55 * cos(t * 0.18),  0.42 * sin(t * 0.15));
     vec2 lobe2 = p - vec2( 0.62 * sin(t * 0.14), -0.38 * cos(t * 0.19));
-    bg += colPrimary   * exp(-dot(lobe1, lobe1) * 0.52) * (0.055 + 0.035 * voiceAmp);
-    bg += colSecondary * exp(-dot(lobe2, lobe2) * 0.62) * (0.042 + 0.035 * voiceAmp);
+    bg += colPrimary   * exp(-dot(lobe1, lobe1) * 0.52) * (0.058 + 0.036 * voiceAmp);
+    bg += colSecondary * exp(-dot(lobe2, lobe2) * 0.62) * (0.045 + 0.036 * voiceAmp);
 
-    // Subtle radial horizon mist beneath the orb (gives grounded studio-floor depth)
+    // Subtle radial horizon mist beneath the orb
     vec2 floorPos = (p - vec2(0.0, -1.18)) * vec2(0.55, 2.4);
     bg += mix(colPrimary, colSecondary, 0.5) * exp(-dot(floorPos, floorPos) * 1.25) * (0.055 + 0.04 * voiceAmp);
 
-    // Subtle 2-layer parallax cosmic dust
+#if QUALITY_TIER >= 1
+    // Subtle parallax cosmic dust (1 layer on Medium, 2 layers on High)
     vec2 aspectUv = (uv - 0.5) * vec2(res.x / minDim, res.y / minDim);
-    float s1 = starLayer(aspectUv + vec2(t * 0.004, -t * 0.009) - u_mouse * 0.015, 7.5,  t, 11.0);
+    float s1 = starLayer(aspectUv + vec2(t * 0.004, -t * 0.009) - u_mouse * 0.015, 7.5, t, 11.0);
+#if QUALITY_TIER >= 2
     float s2 = starLayer(aspectUv + vec2(-t * 0.003, -t * 0.005) - u_mouse * 0.007, 13.0, t, 47.0);
+    float stars = s1 * 0.34 + s2 * 0.22;
+#else
+    float stars = s1 * 0.32;
+#endif
     float starMask = smoothstep(0.55, 1.45, radial);
-    bg += mix(vec3(0.76, 0.80, 1.0), colSecondary, 0.35) * (s1 * 0.34 + s2 * 0.22) * starMask;
+    bg += mix(vec3(0.76, 0.80, 1.0), colSecondary, 0.35) * stars * starMask;
+#endif
 
     // --- 2. 3D Camera & Mouse Parallax ---
     vec3 ro = vec3(0.0, 0.0, 3.15);
@@ -244,7 +298,7 @@ void main() {
     ro.xz = rot2(yaw)   * ro.xz;
     rd.xz = rot2(yaw)   * rd.xz;
 
-    // --- 3. 3D Tilted Energy Orbital Ring (Ray-Plane Intersection) ---
+    // --- 3. 3D Tilted Energy Orbital Ring (Single analytical ray-plane intersection) ---
     vec3 ringN = normalize(vec3(
         0.26 * sin(t * 0.22),
         0.89,
@@ -269,12 +323,122 @@ void main() {
             if (alphaRing > 0.002) {
                 tRing = tr;
                 vec3 rc = mix(colPrimary, colSecondary, 0.5 + 0.5 * sin(angle - t * 0.8));
+                if (u_rainbow > 0.001) {
+                    rc = mix(rc, hueShift(rc, angle * 0.85), u_rainbow * 0.75);
+                }
                 ringCol = rc * alphaRing;
             }
         }
     }
 
-    // --- 4. Raymarch the 3D Liquid Glass / Ferrofluid Orb ---
+    vec3 col = bg;
+    float haloAngle = atan(p.y, p.x);
+    vec3 haloColor = mix(colPrimary, colSecondary, 0.45 + 0.35 * sin(haloAngle * 2.0 - t * 0.7));
+    if (u_rainbow > 0.001) {
+        haloColor = mix(haloColor, hueShift(haloColor, haloAngle * 0.9), u_rainbow * 0.65);
+    }
+
+#if QUALITY_TIER == 0
+    // =========================================================================
+    // LOW (LITE) TIER: Zero-loop analytical 3D Liquid Glass sphere (~15x lighter)
+    // Still delivers 3D curvature, live audio ripples, swirling glass core & speculars
+    // =========================================================================
+    float breath = sin(t * 1.45) * 0.022 + sin(t * 0.63 + 1.2) * 0.010;
+    float rippleOutline = (sin(haloAngle * 3.0 - t * 1.6 * speed) * 0.6
+                         + cos(haloAngle * 5.0 + t * 2.1 * speed) * 0.4)
+                        * (0.010 + 0.026 * voiceAmp + 0.018 * openAmp + 0.020 * u_pulse)
+                        * (1.0 - 0.5 * w.w);
+    float sphereR = 0.88 + breath + voiceAmp * 0.075 + openAmp * 0.040 + u_pulse * 0.055 + rippleOutline;
+
+    float b = dot(ro, rd);
+    float cSph = dot(ro, ro) - sphereR * sphereR;
+    float disc = b * b - cSph;
+
+    bool hit = false;
+    float tHit = 100.0;
+    float edgeGap = max(radial - sphereR * 0.68, 0.0);
+
+    if (disc > 0.0) {
+        float tNear = -b - sqrt(disc);
+        if (tNear > 0.0) {
+            hit = true;
+            tHit = tNear;
+            edgeGap = 0.0;
+        }
+    }
+
+    // Contoured outer atmospheric bloom
+    float softBloom = exp(-radial * 1.72) * (0.22 + 0.18 * voiceAmp + 0.14 * u_pulse);
+    float contourHalo = exp(-edgeGap * 6.2) * (0.30 + 0.24 * voiceAmp + 0.18 * u_pulse);
+    col += haloColor * (softBloom + contourHalo) * (1.0 - 0.45 * w.w);
+
+    // Back half of 3D orbital ring
+    if (tRing > 0.0 && (!hit || tRing > tHit)) {
+        col += ringCol * 0.85;
+    }
+
+    if (hit) {
+        vec3 pos = ro + rd * tHit;
+        vec3 N0  = normalize(pos);
+        vec3 V   = -rd;
+
+        // Lightweight single-pass liquid surface wave normal perturbation
+        vec3 sw = pos;
+        sw.xz = rot2(t * 0.34 * speed) * sw.xz;
+        float w1 = gyroid(sw * 2.75 + vec3(0.0, t * 0.55 * speed, -t * 0.35 * speed));
+        float w2 = sin(pos.x * 4.2 + t * 1.3 * speed) * cos(pos.y * 3.8 - t * 1.1 * speed);
+        float perturbAmp = (0.14 + 0.18 * voiceAmp + 0.12 * openAmp + 0.12 * w.z) * (1.0 - 0.45 * w.w);
+        vec3 N = normalize(N0 + vec3(w1 * 0.65 + w2 * 0.35, w2 * 0.55 - w1 * 0.35, 0.0) * perturbAmp);
+
+        float ndv = clamp(dot(N, V), 0.0, 1.0);
+        float ndvGeom = clamp(dot(N0, V), 0.0, 1.0);
+
+        // Refracted luminous swirling plasma core (single cheap gyroid evaluation)
+        vec3 refr = refract(rd, N, 1.0 / 1.36);
+        vec3 ip = pos + refr * 0.42;
+        ip.xz = rot2(t * 0.45 * speed) * ip.xz;
+        ip.xy = rot2(-t * 0.28 * speed) * ip.xy;
+        float gIn = gyroid(ip * 2.85 + vec3(0.0, t * 0.65 * speed, -t * 0.45));
+        float ribbonA = pow(clamp(1.0 - abs(gIn) * 0.80, 0.0, 1.0), 2.8);
+        float ribbonB = pow(clamp(1.0 - abs(gIn + 0.65) * 0.85, 0.0, 1.0), 3.2);
+        float coreFade = smoothstep(1.22, 0.18, length(ip));
+
+        vec3 innerGlow = (colPrimary * ribbonA + colSecondary * ribbonB * 0.9 + colAccent * (ribbonA * ribbonB) * 1.2)
+                       * coreFade * (0.72 + 0.58 * voiceAmp + 0.32 * openAmp);
+        vec3 deepCore = mix(u_bg_center * 1.2, colPrimary * 0.24, pow(ndv, 1.5));
+        float centerHeart = pow(ndv, 2.4) * (0.30 + 0.34 * voiceAmp + 0.18 * u_pulse);
+        vec3 interior = deepCore + innerGlow + mix(colPrimary, colSecondary, 0.6) * centerHeart;
+
+        // Dichroic iridescence + crisp Fresnel glass rim
+        vec3 irid = iridescence(ndv * 1.05 + w1 * 0.20 + t * 0.06, colPrimary, colSecondary, colAccent);
+        float fresnel  = pow(1.0 - ndv, 2.6);
+        float rimSharp = pow(1.0 - ndvGeom, 4.8);
+
+        // 2-point glossy studio highlights
+        vec3 R = reflect(rd, N);
+        vec3 L1 = normalize(vec3(-0.58, 0.72, 0.56));
+        vec3 L2 = normalize(vec3(0.72, -0.48, 0.38));
+        float specKeySharp = pow(max(dot(R, L1), 0.0), 56.0);
+        float specKeyBroad = pow(max(dot(R, L1), 0.0), 10.0);
+        float diffKey      = max(dot(N, L1), 0.0);
+        float specFill     = pow(max(dot(R, L2), 0.0), 18.0);
+
+        vec3 orbCol = interior * (0.74 + 0.34 * diffKey);
+        orbCol += irid * fresnel * (0.90 + 0.35 * voiceAmp);
+        orbCol += mix(colSecondary, vec3(0.94, 0.97, 1.0), 0.55) * rimSharp * (1.25 + 0.55 * voiceAmp);
+        orbCol += vec3(0.96, 0.98, 1.00) * specKeySharp * 1.40;
+        orbCol += mix(colSecondary, vec3(0.85, 0.90, 1.0), 0.5) * specKeyBroad * 0.32;
+        orbCol += mix(colPrimary, colAccent, 0.5) * specFill * 0.56;
+
+        float edgeAA = smoothstep(0.0, 0.14, ndvGeom);
+        col = mix(col + haloColor * 0.44, orbCol, edgeAA);
+    }
+#else
+    // =========================================================================
+    // MEDIUM (28 steps, 2-octave) & HIGH (64 steps, 3-octave) 3D Raymarching
+    // =========================================================================
+    FieldCtx fctx = makeFieldCtx(t, speed, voiceAmp, openAmp);
+
     float b = dot(ro, rd);
     float cBound = dot(ro, ro) - 1.48 * 1.48;
     float disc = b * b - cBound;
@@ -289,26 +453,34 @@ void main() {
         float tFar  = -b + sDisc;
         float tRay  = tNear;
 
-        for (int i = 0; i < 64; i++) {
+#if QUALITY_TIER >= 2
+        const int MAX_STEPS = 64;
+        const float HIT_EPS = 0.0014;
+        const float STEP_SCALE = 0.58;
+#else
+        const int MAX_STEPS = 28;
+        const float HIT_EPS = 0.0032;
+        const float STEP_SCALE = 0.78;
+#endif
+
+        for (int i = 0; i < MAX_STEPS; i++) {
             vec3 pos = ro + rd * tRay;
-            float d = mapOrb(pos, t, speed, voiceAmp, openAmp);
+            float d = mapOrb(pos, fctx);
             minDist = min(minDist, max(d, 0.0));
-            if (d < 0.0014) {
+            if (d < HIT_EPS) {
                 hit = true;
                 tHit = tRay;
                 break;
             }
-            tRay += d * 0.58;
+            tRay += d * STEP_SCALE;
             if (tRay > tFar) break;
         }
     }
 
     // Contoured outer atmospheric bloom hugging the live orb silhouette
-    vec3 col = bg;
     float haloDist = hit ? 0.0 : minDist;
     float softBloom = exp(-radial * 1.75) * (0.20 + 0.16 * voiceAmp + 0.12 * u_pulse);
     float contourHalo = exp(-haloDist * 7.5) * (0.28 + 0.24 * voiceAmp + 0.18 * u_pulse);
-    vec3 haloColor = mix(colPrimary, colSecondary, 0.45 + 0.35 * sin(atan(p.y, p.x) * 2.0 - t * 0.7));
     col += haloColor * (softBloom + contourHalo) * (1.0 - 0.45 * w.w);
 
     // Back half of 3D orbital ring (behind orb)
@@ -319,22 +491,28 @@ void main() {
     // --- 5. Shade the 3D Liquid Glass / Ferrofluid Surface ---
     if (hit) {
         vec3 pos = ro + rd * tHit;
-        vec3 N   = calcNormal(pos, t, speed, voiceAmp, openAmp);
+        vec3 N   = calcNormal(pos, fctx);
         vec3 V   = -rd;
         float ndv = clamp(dot(N, V), 0.0, 1.0);
 
-        // Refracted internal swirling plasma core (gives true crystal/liquid glass depth)
+        // Refracted internal swirling plasma core
         vec3 refr = refract(rd, N, 1.0 / 1.38);
         vec3 innerAccum = vec3(0.0);
 
-        for (int j = 0; j < 3; j++) {
-            float depth = 0.28 + float(j) * 0.36;
+#if QUALITY_TIER >= 2
+        const int INNER_LAYERS = 3;
+#else
+        const int INNER_LAYERS = 2;
+#endif
+        for (int j = 0; j < INNER_LAYERS; j++) {
+            float fj = float(j);
+            float depth = 0.28 + fj * 0.38;
             vec3 ip = pos + refr * depth;
             vec3 iq = ip;
-            iq.xz = rot2(t * (0.35 + 0.2 * float(j)) * speed) * iq.xz;
-            iq.xy = rot2(-t * 0.24 * speed + float(j) * 1.1) * iq.xy;
+            iq.xz = rot2(t * (0.35 + 0.2 * fj) * speed) * iq.xz;
+            iq.xy = rot2(-t * 0.24 * speed + fj * 1.1) * iq.xy;
 
-            float gIn = gyroid(iq * (2.6 + float(j) * 0.85) + vec3(0.0, t * 0.6 * speed, -t * 0.4));
+            float gIn = gyroid(iq * (2.6 + fj * 0.85) + vec3(0.0, t * 0.6 * speed, -t * 0.4));
             float ribbon = pow(clamp(1.0 - abs(gIn) * 0.78, 0.0, 1.0), 3.2);
             float coreFade = smoothstep(1.25, 0.15, length(ip));
 
@@ -342,63 +520,58 @@ void main() {
             innerAccum += layerCol * ribbon * coreFade * (0.58 + 0.55 * voiceAmp + 0.30 * openAmp);
         }
 
-        // Deep obsidian-glass interior absorption
-        vec3 deepCore = mix(vec3(0.015, 0.010, 0.045), colPrimary * 0.22, pow(ndv, 1.6));
-        // Warm luminous heart right in the center
+        vec3 deepCore = mix(u_bg_center * 1.1, colPrimary * 0.22, pow(ndv, 1.6));
         float centerHeart = pow(ndv, 2.6) * (0.28 + 0.32 * voiceAmp + 0.18 * u_pulse);
         vec3 interior = deepCore + innerAccum + mix(colPrimary, colSecondary, 0.65) * centerHeart;
 
         // Dichroic thin-film iridescence on curved liquid surface
         float surfWave = gyroid(pos * 3.1 + vec3(t * 0.4, -t * 0.3, 0.0)) * 0.22;
         vec3 irid = iridescence(ndv * 1.05 + surfWave + t * 0.06, colPrimary, colSecondary, colAccent);
+        if (u_rainbow > 0.001) {
+            irid = mix(irid, hueShift(irid, pos.x * 1.4 + pos.y * 1.2 + t * 0.4), u_rainbow * 0.75);
+        }
 
-        // Fresnel glass reflection + subtle optical chromatic dispersion at rim
         float fresnel  = pow(1.0 - ndv, 2.8);
         float rimSharp = pow(1.0 - ndv, 5.2);
-        vec3 fresnelDisp = vec3(
-            pow(1.0 - ndv, 2.55),
-            pow(1.0 - ndv, 2.85),
-            pow(1.0 - ndv, 3.20)
-        );
 
-        // 3-point studio environment lighting (makes the 3D form pop like glossy ferrofluid)
         vec3 R = reflect(rd, N);
-
-        // Key studio softbox (top-left front)
         vec3 L1 = normalize(vec3(-0.58, 0.72, 0.56));
         float specKeySharp = pow(max(dot(R, L1), 0.0), 64.0);
         float specKeyBroad = pow(max(dot(R, L1), 0.0), 10.0);
         float diffKey      = max(dot(N, L1), 0.0);
 
-        // Electric fill light (bottom-right)
         vec3 L2 = normalize(vec3(0.74, -0.52, 0.34));
         float specFill = pow(max(dot(R, L2), 0.0), 18.0);
         float diffFill = max(dot(N, L2), 0.0);
 
-        // Top zenith cyan edge sheen
-        vec3 L3 = normalize(vec3(0.12, 0.94, -0.26));
-        float specTop = pow(max(dot(R, L3), 0.0), 28.0);
-
-        // Compose glossy liquid glass surface
         vec3 orbCol = interior * (0.72 + 0.35 * diffKey);
         orbCol += irid * fresnel * (0.85 + 0.35 * voiceAmp);
         orbCol += mix(colSecondary, vec3(0.92, 0.96, 1.0), 0.55) * rimSharp * (1.25 + 0.55 * voiceAmp);
-        orbCol += fresnelDisp * colAccent * 0.28;
-
-        // Crisp specular studio highlights (ferrofluid liquid chrome sheen)
         orbCol += vec3(0.96, 0.98, 1.00) * specKeySharp * 1.45;
         orbCol += mix(colSecondary, vec3(0.85, 0.90, 1.0), 0.5) * specKeyBroad * 0.34;
         orbCol += mix(colPrimary, colAccent, 0.5) * (specFill * 0.58 + diffFill * 0.14);
+
+#if QUALITY_TIER >= 2
+        vec3 fresnelDisp = vec3(
+            pow(1.0 - ndv, 2.55),
+            pow(1.0 - ndv, 2.85),
+            pow(1.0 - ndv, 3.20)
+        );
+        vec3 L3 = normalize(vec3(0.12, 0.94, -0.26));
+        float specTop = pow(max(dot(R, L3), 0.0), 28.0);
+        orbCol += fresnelDisp * colAccent * 0.28;
         orbCol += colSecondary * specTop * 0.65;
 
-        // Micro-ripple sheen along high-curvature crests when speaking
         float crest = smoothstep(0.35, 1.0, abs(surfWave) * 3.8) * (0.18 + 0.55 * voiceAmp);
         orbCol += mix(colSecondary, vec3(1.0), 0.4) * crest * (0.35 + 0.65 * fresnel);
+#else
+        orbCol += colAccent * fresnel * 0.24;
+#endif
 
-        // Smooth antialiased silhouette edge blend into outer glow
         float edgeAA = smoothstep(0.0, 0.12, ndv);
         col = mix(col + haloColor * 0.42, orbCol, edgeAA);
     }
+#endif
 
     // Front half of 3D orbital ring (passes IN FRONT of the orb!)
     if (tRing > 0.0 && hit && tRing < tHit) {
@@ -409,7 +582,7 @@ void main() {
     col = aces(col * 1.12);
     col = pow(max(col, vec3(0.0)), vec3(1.0 / 2.2));
 
-    // Subtle dithering to completely eliminate 8-bit dark gradient banding
+    // Subtle dithering to eliminate 8-bit dark gradient banding
     float dither = (hash21(gl_FragCoord.xy) - 0.5) / 255.0;
     col = clamp(col + dither, 0.0, 1.0);
 
@@ -417,15 +590,13 @@ void main() {
 }
 "#;
 
-impl OrbRenderer {
-    pub fn new(gl: &glow::Context) -> Result<Self, String> {
+impl TierProgram {
+    unsafe fn compile(gl: &glow::Context, is_es: bool, tier: usize) -> Result<Self, String> {
         unsafe {
-            let glsl_ver = gl.get_parameter_string(glow::SHADING_LANGUAGE_VERSION);
-            let is_es = glsl_ver.contains(" ES ");
             let header = if is_es {
-                "#version 300 es\nprecision highp float;\n"
+                format!("#version 300 es\nprecision highp float;\n#define QUALITY_TIER {tier}\n")
             } else {
-                "#version 140\n"
+                format!("#version 140\n#define QUALITY_TIER {tier}\n")
             };
 
             let vert_src = format!("{header}{VERT_BODY}");
@@ -459,82 +630,146 @@ impl OrbRenderer {
 
             if !linked {
                 gl.delete_program(program);
-                return Err(format!("shader link error: {log}"));
+                return Err(format!("shader link error (tier {tier}): {log}"));
             }
+
+            Ok(Self {
+                u_viewport_origin: gl.get_uniform_location(program, "u_viewport_origin"),
+                u_resolution: gl.get_uniform_location(program, "u_resolution"),
+                u_time: gl.get_uniform_location(program, "u_time"),
+                u_orb_center: gl.get_uniform_location(program, "u_orb_center"),
+                u_orb_scale: gl.get_uniform_location(program, "u_orb_scale"),
+                u_audio: gl.get_uniform_location(program, "u_audio"),
+                u_openness: gl.get_uniform_location(program, "u_openness"),
+                u_width: gl.get_uniform_location(program, "u_width"),
+                u_state_weights: gl.get_uniform_location(program, "u_state_weights"),
+                u_mouse: gl.get_uniform_location(program, "u_mouse"),
+                u_muted: gl.get_uniform_location(program, "u_muted"),
+                u_pulse: gl.get_uniform_location(program, "u_pulse"),
+                u_col_primary: gl.get_uniform_location(program, "u_col_primary"),
+                u_col_secondary: gl.get_uniform_location(program, "u_col_secondary"),
+                u_col_accent: gl.get_uniform_location(program, "u_col_accent"),
+                u_bg_center: gl.get_uniform_location(program, "u_bg_center"),
+                u_bg_edge: gl.get_uniform_location(program, "u_bg_edge"),
+                u_rainbow: gl.get_uniform_location(program, "u_rainbow"),
+                program,
+            })
+        }
+    }
+}
+
+impl OrbRenderer {
+    pub fn new(gl: &glow::Context, initial_quality: GraphicsQuality) -> Result<Self, String> {
+        unsafe {
+            let glsl_ver = gl.get_parameter_string(glow::SHADING_LANGUAGE_VERSION);
+            let is_es = glsl_ver.contains(" ES ");
 
             let vao = gl
                 .create_vertex_array()
                 .map_err(|e| format!("create_vertex_array: {e}"))?;
 
-            let u_viewport_origin = gl.get_uniform_location(program, "u_viewport_origin");
-            let u_resolution = gl.get_uniform_location(program, "u_resolution");
-            let u_time = gl.get_uniform_location(program, "u_time");
-            let u_orb_center = gl.get_uniform_location(program, "u_orb_center");
-            let u_orb_scale = gl.get_uniform_location(program, "u_orb_scale");
-            let u_audio = gl.get_uniform_location(program, "u_audio");
-            let u_openness = gl.get_uniform_location(program, "u_openness");
-            let u_width = gl.get_uniform_location(program, "u_width");
-            let u_state_weights = gl.get_uniform_location(program, "u_state_weights");
-            let u_mouse = gl.get_uniform_location(program, "u_mouse");
-            let u_muted = gl.get_uniform_location(program, "u_muted");
-            let u_pulse = gl.get_uniform_location(program, "u_pulse");
+            let mut tiers: [Option<TierProgram>; 3] = [None, None, None];
+            let idx = initial_quality.tier_index();
+            match TierProgram::compile(gl, is_es, idx) {
+                Ok(prog) => tiers[idx] = Some(prog),
+                Err(e) => {
+                    gl.delete_vertex_array(vao);
+                    return Err(e);
+                }
+            }
 
-            Ok(Self {
-                program,
-                vao,
-                u_viewport_origin,
-                u_resolution,
-                u_time,
-                u_orb_center,
-                u_orb_scale,
-                u_audio,
-                u_openness,
-                u_width,
-                u_state_weights,
-                u_mouse,
-                u_muted,
-                u_pulse,
-            })
+            Ok(Self { is_es, vao, tiers })
         }
     }
 
     pub fn paint(
-        &self,
+        &mut self,
         gl: &glow::Context,
         viewport_origin: [f32; 2],
         resolution: [f32; 2],
         u: &OrbUniforms,
     ) {
+        let idx = u.quality.tier_index();
+        if self.tiers[idx].is_none() {
+            match unsafe { TierProgram::compile(gl, self.is_es, idx) } {
+                Ok(prog) => {
+                    tracing::info!("compiled 3D orb shader for quality tier {:?}", u.quality);
+                    self.tiers[idx] = Some(prog);
+                }
+                Err(e) => {
+                    tracing::error!("failed to compile orb shader tier {:?}: {e}", u.quality);
+                }
+            }
+        }
+
+        let Some(tp) = self.tiers[idx]
+            .as_ref()
+            .or_else(|| self.tiers.iter().flatten().next())
+        else {
+            return;
+        };
+
         unsafe {
             gl.disable(glow::DEPTH_TEST);
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
 
-            gl.use_program(Some(self.program));
+            gl.use_program(Some(tp.program));
             gl.bind_vertex_array(Some(self.vao));
 
             gl.uniform_2_f32(
-                self.u_viewport_origin.as_ref(),
+                tp.u_viewport_origin.as_ref(),
                 viewport_origin[0],
                 viewport_origin[1],
             );
-            gl.uniform_2_f32(self.u_resolution.as_ref(), resolution[0], resolution[1]);
-            gl.uniform_1_f32(self.u_time.as_ref(), u.time);
-            gl.uniform_2_f32(self.u_orb_center.as_ref(), u.orb_center[0], u.orb_center[1]);
-            gl.uniform_1_f32(self.u_orb_scale.as_ref(), u.orb_scale);
-            gl.uniform_1_f32(self.u_audio.as_ref(), u.audio);
-            gl.uniform_1_f32(self.u_openness.as_ref(), u.openness);
-            gl.uniform_1_f32(self.u_width.as_ref(), u.width);
+            gl.uniform_2_f32(tp.u_resolution.as_ref(), resolution[0], resolution[1]);
+            gl.uniform_1_f32(tp.u_time.as_ref(), u.time);
+            gl.uniform_2_f32(tp.u_orb_center.as_ref(), u.orb_center[0], u.orb_center[1]);
+            gl.uniform_1_f32(tp.u_orb_scale.as_ref(), u.orb_scale);
+            gl.uniform_1_f32(tp.u_audio.as_ref(), u.audio);
+            gl.uniform_1_f32(tp.u_openness.as_ref(), u.openness);
+            gl.uniform_1_f32(tp.u_width.as_ref(), u.width);
             gl.uniform_4_f32(
-                self.u_state_weights.as_ref(),
+                tp.u_state_weights.as_ref(),
                 u.state_weights[0],
                 u.state_weights[1],
                 u.state_weights[2],
                 u.state_weights[3],
             );
-            gl.uniform_2_f32(self.u_mouse.as_ref(), u.mouse[0], u.mouse[1]);
-            gl.uniform_1_f32(self.u_muted.as_ref(), u.muted);
-            gl.uniform_1_f32(self.u_pulse.as_ref(), u.pulse);
+            gl.uniform_2_f32(tp.u_mouse.as_ref(), u.mouse[0], u.mouse[1]);
+            gl.uniform_1_f32(tp.u_muted.as_ref(), u.muted);
+            gl.uniform_1_f32(tp.u_pulse.as_ref(), u.pulse);
+            gl.uniform_3_f32(
+                tp.u_col_primary.as_ref(),
+                u.col_primary[0],
+                u.col_primary[1],
+                u.col_primary[2],
+            );
+            gl.uniform_3_f32(
+                tp.u_col_secondary.as_ref(),
+                u.col_secondary[0],
+                u.col_secondary[1],
+                u.col_secondary[2],
+            );
+            gl.uniform_3_f32(
+                tp.u_col_accent.as_ref(),
+                u.col_accent[0],
+                u.col_accent[1],
+                u.col_accent[2],
+            );
+            gl.uniform_3_f32(
+                tp.u_bg_center.as_ref(),
+                u.bg_center[0],
+                u.bg_center[1],
+                u.bg_center[2],
+            );
+            gl.uniform_3_f32(
+                tp.u_bg_edge.as_ref(),
+                u.bg_edge[0],
+                u.bg_edge[1],
+                u.bg_edge[2],
+            );
+            gl.uniform_1_f32(tp.u_rainbow.as_ref(), u.rainbow);
 
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
@@ -545,7 +780,9 @@ impl OrbRenderer {
 
     pub fn destroy(&self, gl: &glow::Context) {
         unsafe {
-            gl.delete_program(self.program);
+            for tp in self.tiers.iter().flatten() {
+                gl.delete_program(tp.program);
+            }
             gl.delete_vertex_array(self.vao);
         }
     }
