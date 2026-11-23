@@ -10,6 +10,7 @@
 
 [![Download for Windows x64](https://img.shields.io/badge/Download_for_Windows_x64-Latest_ZIP-22D3EE?style=for-the-badge&logo=windows&logoColor=white&labelColor=0F172A)](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-Windows-x64.zip)
 [![Portable boogie.exe](https://img.shields.io/badge/Portable-boogie.exe-8B5CF6?style=for-the-badge&labelColor=0F172A)](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/boogie.exe)
+[![Official Website](https://img.shields.io/badge/Website_%26_Guide-VI_%2F_EN-10B981?style=for-the-badge&labelColor=0F172A)](https://thodark.github.io/Boogie-AI-Assistant/)
 
 <sub>Windows 10 / 11 (64-bit) · <strong>No Rust, Cargo, or Python required</strong> · Portable single-file binary</sub><br />
 <sub><a href="#download-for-windows">Download</a> · <a href="#first-time-setup-gemini-api-key">Gemini API Key Setup</a> · <a href="#verify-release-checksums-sha-256">SHA-256</a> · <a href="#changelog">Changelog</a> · <a href="#build-from-source-for-developers">Build from Source</a></sub>

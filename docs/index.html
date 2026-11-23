@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="vi" data-theme="obsidian">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Boogie — Trợ Lý AI Giọng Nói Cho Windows | Native Rust Voice AI</title>
+  <meta name="description" content="Tải Boogie miễn phí cho Windows (bản Portable, không cần cài code). Trợ lý AI giọng nói thời gian thực chạy Gemini Live API, quả cầu 3D Liquid Glass, 43 công cụ điều khiển máy tính và trí nhớ thông minh." />
+  <meta property="og:title" content="Boogie — Native Rust Voice AI Assistant for Windows" />
+  <meta property="og:description" content="Open-source JARVIS-style voice AI assistant for Windows. Download portable ZIP/EXE, no coding required. Powered by Gemini Live API & 60 FPS 3D Liquid Glass Orb." />
+  <meta property="og:image" content="https://thodark.github.io/Boogie-AI-Assistant/assets/social_preview.png" />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" type="image/png" href="assets/logo_icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Ambient dynamic aurora glow -->
+  <div class="ambient-bg" aria-hidden="true">
+    <div class="aurora-blob blob-1"></div>
+    <div class="aurora-blob blob-2"></div>
+    <div class="aurora-blob blob-3"></div>
+    <div class="grid-overlay"></div>
+  </div>
+
+  <!-- Sticky Navigation -->
+  <header class="navbar" id="top">
+    <div class="container nav-inner">
+      <a href="#top" class="brand">
+        <img src="assets/logo_icon.png" alt="Boogie" class="brand-icon" />
+        <span class="brand-name">BOOGIE</span>
+        <span class="version-pill" id="nav-version">v0.2.0</span>
+      </a>
+
+      <nav class="nav-links" id="nav-links" aria-label="Main navigation">
+        <a href="#download" data-i18n="nav.download">Tải về</a>
+        <a href="#setup" data-i18n="nav.setup">Cài đặt</a>
+        <a href="#commands" data-i18n="nav.commands">Cách nói lệnh</a>
+        <a href="#performance" data-i18n="nav.performance">Hiệu năng</a>
+        <a href="#changelog" data-i18n="nav.changelog">Changelog</a>
+        <a href="#contact" data-i18n="nav.contact">Liên hệ</a>
+      </nav>
+
+      <div class="nav-actions">
+        <div class="lang-switch" role="group" aria-label="Language switcher">
+          <button type="button" class="lang-btn active" data-lang="vi">VI</button>
+          <button type="button" class="lang-btn" data-lang="en">EN</button>
+        </div>
+        <a href="#download" class="btn btn-primary btn-sm" data-i18n="nav.cta">Tải ngay</a>
+        <button type="button" class="menu-toggle" id="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">
+          <span></span><span></span><span></span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero Section -->
+    <section class="hero">
+      <div class="container">
+        <div class="hero-content">
+          <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest" target="_blank" rel="noopener" class="release-badge">
+            <span class="pulse-dot"></span>
+            <span id="hero-release-tag">v0.2.0</span>
+            <span class="badge-sep">·</span>
+            <span data-i18n="hero.badge">Mới: 3 mức đồ họa, 8 chủ đề màu & Trí nhớ thông minh</span>
+          </a>
+
+          <h1 class="hero-title" data-i18n="hero.title">
+            Trợ lý AI giọng nói <span class="gradient-text">kiểu JARVIS</span> ngay trên Windows của bạn.
+          </h1>
+
+          <p class="hero-subtitle" data-i18n="hero.subtitle">
+            Tải về là chạy ngay — không cần cài đặt phức tạp, không cần biết code. Nói chuyện tự nhiên bằng tiếng Việt hoặc tiếng Anh với phản hồi ~0.58 giây, nhìn thấy màn hình, điều khiển 43 tác vụ Windows và nhớ những gì bạn kể.
+          </p>
+
+          <div class="hero-cta">
+            <a id="hero-zip-btn" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-Windows-x64.zip" class="btn btn-primary btn-lg">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              <span data-i18n="hero.downloadZip">Tải cho Windows (ZIP — Khuyên dùng)</span>
+              <span class="btn-meta" id="hero-zip-size">~11 MB</span>
+            </a>
+            <a id="hero-exe-btn" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/boogie.exe" class="btn btn-secondary btn-lg">
+              <span data-i18n="hero.downloadExe">Bản Portable 1 file (boogie.exe)</span>
+              <span class="btn-meta" id="hero-exe-size">~28 MB</span>
+            </a>
+          </div>
+
+          <div class="trust-strip">
+            <span class="trust-item"><span class="check">✓</span> <span data-i18n="hero.trust1">Windows 10 / 11 (64-bit)</span></span>
+            <span class="trust-item"><span class="check">✓</span> <span data-i18n="hero.trust2">Không cần Rust, Cargo hay Python</span></span>
+            <span class="trust-item"><span class="check">✓</span> <span data-i18n="hero.trust3">Chạy Portable không cần cài</span></span>
+            <span class="trust-item"><span class="check">✓</span> <span data-i18n="hero.trust4">Miễn phí & Mã nguồn mở (MIT)</span></span>
+          </div>
+        </div>
+
+        <!-- Live Theme Switcher Bar -->
+        <div class="theme-bar-wrap">
+          <div class="theme-bar-label">
+            <span data-i18n="hero.tryThemes">Thử đổi 8 bộ màu có sẵn trong Boogie:</span>
+            <strong id="active-theme-name">Neon Obsidian</strong>
+          </div>
+          <div class="theme-pills" id="theme-pills" role="group" aria-label="Color theme preview"></div>
+        </div>
+
+        <!-- Screenshot Showcase -->
+        <div class="showcase-frame">
+          <div class="showcase-glow" aria-hidden="true"></div>
+          <img src="assets/screenshot.png" alt="Boogie 3D Liquid Glass Orb Interface" class="showcase-img" />
+        </div>
+
+        <!-- Key Stats -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-value">~137 ms</div>
+            <div class="stat-label" data-i18n="stats.startup">Mở cửa sổ tức thì</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value">~580 ms</div>
+            <div class="stat-label" data-i18n="stats.ttfb">Độ trễ phản hồi giọng nói</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value">~33 MB</div>
+            <div class="stat-label" data-i18n="stats.ram">RAM thực tế siêu nhẹ</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value">43</div>
+            <div class="stat-label" data-i18n="stats.tools">Công cụ điều khiển Windows</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Download & SHA-256 Section -->
+    <section class="section" id="download">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-eyebrow" data-i18n="download.eyebrow">TẢI XUỐNG CHÍNH THỨC</span>
+          <h2 class="section-title" data-i18n="download.title">Chọn bản phù hợp với bạn</h2>
+          <p class="section-desc" data-i18n="download.desc">
+            Tất cả bản phát hành đều được biên dịch tự động trực tiếp từ mã nguồn công khai trên GitHub Actions, không chứa phần mềm quảng cáo.
+          </p>
+        </div>
+
+        <div class="download-grid">
+          <article class="glass-card download-card featured">
+            <div class="card-badge" data-i18n="download.recommended">Khuyên dùng</div>
+            <h3>Boogie-Windows-x64.zip</h3>
+            <p class="card-text" data-i18n="download.zipDesc">
+              Gói Portable đầy đủ gồm <code>boogie.exe</code>, mẫu cấu hình, hướng dẫn và giấy phép MIT. Chỉ cần giải nén vào một thư mục cố định (như <code>D:\Boogie\</code>) và mở chạy.
+            </p>
+            <div class="card-meta">
+              <span id="card-zip-version">v0.2.0</span>
+              <span>·</span>
+              <span id="card-zip-size">~11 MB</span>
+              <span>·</span>
+              <span>Windows x64</span>
+            </div>
+            <a id="card-zip-link" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-Windows-x64.zip" class="btn btn-primary btn-block">
+              <span data-i18n="download.zipBtn">Tải gói ZIP</span>
+            </a>
+          </article>
+
+          <article class="glass-card download-card">
+            <div class="card-badge secondary" data-i18n="download.portable">1 File duy nhất</div>
+            <h3>boogie.exe</h3>
+            <p class="card-text" data-i18n="download.exeDesc">
+              Bản chạy thẳng 1 tệp duy nhất, không cần giải nén. Tự động tạo thư mục <code>config/</code> bên cạnh file để lưu cấu hình, API key và bộ nhớ trên máy bạn.
+            </p>
+            <div class="card-meta">
+              <span id="card-exe-version">v0.2.0</span>
+              <span>·</span>
+              <span id="card-exe-size">~28.3 MB</span>
+              <span>·</span>
+              <span>Standalone EXE</span>
+            </div>
+            <a id="card-exe-link" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/boogie.exe" class="btn btn-secondary btn-block">
+              <span data-i18n="download.exeBtn">Tải boogie.exe</span>
+            </a>
+          </article>
+        </div>
+
+        <!-- SHA-256 Verification Box -->
+        <div class="glass-card sha-card">
+          <div class="sha-head">
+            <div>
+              <h3 data-i18n="sha.title">Kiểm tra mã toàn vẹn SHA-256</h3>
+              <p class="card-text" data-i18n="sha.desc">
+                Đối chiếu mã SHA-256 sau khi tải để chắc chắn 100% file nguyên bản từ GitHub Releases và không bị chỉnh sửa.
+              </p>
+            </div>
+            <a id="sha-file-link" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/SHA256SUMS.txt" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">
+              SHA256SUMS.txt ↗
+            </a>
+          </div>
+
+          <div class="sha-table-wrap">
+            <table class="sha-table">
+              <thead>
+                <tr>
+                  <th data-i18n="sha.fileCol">Tệp phát hành (<span id="sha-release-tag">latest</span>)</th>
+                  <th>SHA-256</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>Boogie-Windows-x64.zip</code></td>
+                  <td><code id="sha-zip-hash" class="hash-code">Đang tải từ GitHub...</code></td>
+                </tr>
+                <tr>
+                  <td><code>boogie.exe</code></td>
+                  <td><code id="sha-exe-hash" class="hash-code">Đang tải từ GitHub...</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="code-copy-bar">
+            <code id="ps-verify-cmd">Get-FileHash .\Boogie-Windows-x64.zip -Algorithm SHA256</code>
+            <button type="button" class="copy-btn" data-copy-target="ps-verify-cmd" data-i18n="common.copy">Sao chép</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- First-Time Setup Section -->
+    <section class="section section-alt" id="setup">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-eyebrow" data-i18n="setup.eyebrow">HƯỚNG DẪN LẦN ĐẦU</span>
+          <h2 class="section-title" data-i18n="setup.title">Bắt đầu dùng chỉ trong 2 phút</h2>
+          <p class="section-desc" data-i18n="setup.desc">
+            Không cần gõ dòng lệnh. Làm đúng 4 bước bên dưới là bạn có thể trò chuyện với Boogie ngay.
+          </p>
+        </div>
+
+        <div class="steps-grid">
+          <div class="glass-card step-card">
+            <div class="step-num">01</div>
+            <h3 data-i18n="setup.s1Title">Tải & giải nén vào thư mục cố định</h3>
+            <p data-i18n="setup.s1Desc">
+              Tải <code>Boogie-Windows-x64.zip</code>, bấm chuột phải chọn <strong>Extract All</strong> vào một thư mục cố định (ví dụ <code>D:\Boogie</code>) để Boogie lưu cấu hình và trí nhớ lâu dài.
+            </p>
+          </div>
+
+          <div class="glass-card step-card">
+            <div class="step-num">02</div>
+            <h3 data-i18n="setup.s2Title">Mở boogie.exe (Lưu ý Windows SmartScreen)</h3>
+            <p data-i18n="setup.s2Desc">
+              Click đúp <code>boogie.exe</code>. Nếu Windows hiện bảng xanh <em>"Windows protected your PC"</em> (vì ứng dụng mã nguồn mở miễn phí chưa mua chứng chỉ ký số EV), hãy bấm <strong>More info (Thông tin khác) → Run anyway (Vẫn chạy)</strong>.
+            </p>
+          </div>
+
+          <div class="glass-card step-card">
+            <div class="step-num">03</div>
+            <h3 data-i18n="setup.s3Title">Lấy Gemini API Key miễn phí</h3>
+            <p data-i18n="setup.s3Desc">
+              Mở <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>, đăng nhập tài khoản Google → bấm <strong>Create API key</strong> → copy đoạn mã bắt đầu bằng <code>AIza...</code>. Key chỉ lưu ngay trên máy tính của bạn.
+            </p>
+          </div>
+
+          <div class="glass-card step-card">
+            <div class="step-num">04</div>
+            <h3 data-i18n="setup.s4Title">Dán Key, chọn đồ họa & bắt đầu nói!</h3>
+            <p data-i18n="setup.s4Desc">
+              Trên màn hình <strong>BOOGIE SETUP</strong>, dán key vào ô <strong>Gemini API Key</strong>, chọn mức đồ họa phù hợp máy, chọn bộ màu yêu thích và giọng đọc → bấm <strong>Save &amp; Connect</strong> là xong!
+            </p>
+          </div>
+        </div>
+
+        <!-- Recommended Graphics Tiers -->
+        <div class="glass-card specs-banner">
+          <div class="specs-banner-head">
+            <h3 data-i18n="setup.gfxTitle">Khuyến nghị chọn mức đồ họa Orb theo cấu hình máy</h3>
+            <p data-i18n="setup.gfxSub">Bạn có thể đổi trực tiếp lúc mở lần đầu hoặc bấm nút bánh răng ⚙ Settings bất cứ lúc nào để xem thử ngay (live preview).</p>
+          </div>
+          <div class="tiers-grid">
+            <div class="tier-item">
+              <div class="tier-top">
+                <strong>Low (Lite)</strong>
+                <span class="tier-tag">30 FPS · ~15× nhẹ hơn</span>
+              </div>
+              <p data-i18n="setup.tierLow">
+                Dành cho laptop văn phòng, máy yếu, Intel HD/UHD đời cũ. Dùng shader cầu 3D giải tích không vòng lặp — siêu mượt, ít nóng máy nhưng vẫn có hiệu ứng kính lỏng, gợn sóng theo giọng nói và vòng quỹ đạo 3D.
+              </p>
+            </div>
+            <div class="tier-item">
+              <div class="tier-top">
+                <strong>Medium</strong>
+                <span class="tier-tag">45 FPS · ~3–4× nhẹ hơn</span>
+              </div>
+              <p data-i18n="setup.tierMed">
+                Cân bằng giữa đẹp và mượt cho laptop tầm trung, Intel Iris Xe hoặc AMD Radeon tích hợp. Giữ raymarching 3D thật với lõi plasma và bụi sao.
+              </p>
+            </div>
+            <div class="tier-item">
+              <div class="tier-top">
+                <strong>High (Ultra)</strong>
+                <span class="tier-tag">60 FPS · Tối đa</span>
+              </div>
+              <p data-i18n="setup.tierHigh">
+                Bản đẹp nhất cho PC / Laptop có card đồ họa rời (GTX/RTX/RX) hoặc iGPU mạnh. Raymarching 64 bước đầy đủ, ánh sáng studio 3 điểm và tán sắc cầu vồng.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Voice Command Cookbook -->
+    <section class="section" id="commands">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-eyebrow" data-i18n="cmd.eyebrow">HƯỚNG DẪN NÓI LỆNH</span>
+          <h2 class="section-title" data-i18n="cmd.title">Nói gì để Boogie hiểu &amp; làm chuẩn?</h2>
+          <p class="section-desc" data-i18n="cmd.desc">
+            Boogie hiểu tiếng Việt và tiếng Anh tự nhiên — không cần thuộc câu lệnh cứng nhắc. Dưới đây là những mẫu câu rõ ràng nhất cho từng nhóm tính năng (bấm vào mẫu câu để sao chép).
+          </p>
+        </div>
+
+        <div class="cmd-controls">
+          <div class="cmd-tabs" id="cmd-tabs" role="tablist"></div>
+          <div class="cmd-search-wrap">
+            <input type="search" id="cmd-search" class="cmd-search" placeholder="Tìm nhanh tính năng (vd: màn hình, nhạc, hẹn giờ, nhớ...)" data-i18n-placeholder="cmd.searchPlaceholder" />
+          </div>
+        </div>
+
+        <div class="cmd-grid" id="cmd-grid"></div>
+
+        <!-- Pro Tips for Best Voice Experience -->
+        <div class="glass-card tips-card">
+          <h3 data-i18n="tips.title">Mẹo dùng Boogie thông minh &amp; mượt nhất</h3>
+          <div class="tips-grid">
+            <div class="tip-box">
+              <strong data-i18n="tips.t1Title">Phòng ồn? Bật Push-to-Talk (Space)</strong>
+              <p data-i18n="tips.t1Desc">Mở ⚙ Settings → tích <em>Push-to-Talk (hold Space)</em>. Chỉ cần giữ phím <code>Space</code> khi nói, thả ra Boogie trả lời ngay — không lo tạp âm hay tiếng quạt làm nhiễu.</p>
+            </div>
+            <div class="tip-box">
+              <strong data-i18n="tips.t2Title">Ngắt lời tức thì (&lt; 20 ms)</strong>
+              <p data-i18n="tips.t2Desc">Boogie đang nói dài quá? Cứ nói đè lên hoặc bấm nút vuông <strong>Stop</strong> trên thanh điều khiển bên dưới để dừng ngay lập tức.</p>
+            </div>
+            <div class="tip-box">
+              <strong data-i18n="tips.t3Title">Xem lại phụ đề &amp; quản lý Trí nhớ</strong>
+              <p data-i18n="tips.t3Desc">Bấm thẳng vào dòng phụ đề bên dưới quả cầu để mở khung lịch sử hội thoại. Muốn xem/xóa thứ Boogie đang nhớ về mình, mở ⚙ <strong>Settings → Memory</strong>.</p>
+            </div>
+            <div class="tip-box">
+              <strong data-i18n="tips.t4Title">Nói chuyện tâm sự &amp; đùa thoải mái</strong>
+              <p data-i18n="tips.t4Desc">Từ v0.2.0, Boogie có thể đổi giọng điệu tự nhiên theo ngữ cảnh: làm việc gọn gàng, nói chuyện phiếm biết tung hứng dí dỏm, và lắng nghe ấm áp khi bạn tâm sự.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Security & Privacy -->
+    <section class="section section-alt" id="security">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-eyebrow" data-i18n="sec.eyebrow">AN TOÀN &amp; QUYỀN RIÊNG TƯ</span>
+          <h2 class="section-title" data-i18n="sec.title">Bạn luôn nắm quyền kiểm soát</h2>
+        </div>
+
+        <div class="sec-grid">
+          <div class="glass-card sec-card">
+            <div class="sec-icon">🛡️</div>
+            <h3 data-i18n="sec.c1Title">Hỏi xác nhận trước thao tác nguy hiểm</h3>
+            <p data-i18n="sec.c1Desc">Xóa file, ghi file, chạy lệnh hệ thống thay đổi máy, tắt/khởi động lại PC, tắt ứng dụng hay gửi tin nhắn đều hiện bảng <strong>Approve / Deny</strong> trên màn hình — Boogie không bao giờ tự ý làm lén.</p>
+          </div>
+          <div class="glass-card sec-card">
+            <div class="sec-icon">🔐</div>
+            <h3 data-i18n="sec.c2Title">API Key &amp; Ký ức lưu 100% trên máy bạn</h3>
+            <p data-i18n="sec.c2Desc">Không có máy chủ trung gian. API key (<code>api_keys.json</code>) và bộ nhớ (<code>memory.json</code>) nằm hoàn toàn trong thư mục máy tính của bạn và chỉ kết nối thẳng tới Google Gemini.</p>
+          </div>
+          <div class="glass-card sec-card">
+            <div class="sec-icon">🧱</div>
+            <h3 data-i18n="sec.c3Title">Chống Prompt Injection &amp; Ghi nhật ký Audit</h3>
+            <p data-i18n="sec.c3Desc">Nội dung đọc từ web/PDF/clipboard được cách ly bằng thẻ <code>UNTRUSTED</code> để trang web lạ không thể ra lệnh điều khiển máy bạn. Mọi xác nhận nhạy cảm đều lưu trong <code>~/.boogie/audit.log</code>.</p>
+          </div>
+          <div class="glass-card sec-card">
+            <div class="sec-icon">⚡</div>
+            <h3 data-i18n="sec.c4Title">Bảo vệ Quota Gemini API thông minh</h3>
+            <p data-i18n="sec.c4Desc">Tóm tắt ký ức tự động chạy bằng <code>gemini-2.5-flash-lite</code> (tách quota với Live API), có thời gian nghỉ 10 phút, fallback cục bộ nếu hết quota và có thể bật/tắt tùy ý trong Settings.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Performance Benchmarks -->
+    <section class="section" id="performance">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-eyebrow" data-i18n="perf.eyebrow">HIỆU NĂNG THỰC TẾ</span>
+          <h2 class="section-title" data-i18n="perf.title">Vì sao viết hoàn toàn bằng Rust?</h2>
+          <p class="section-desc" data-i18n="perf.desc">
+            Không kẹp trình duyệt Chromium nặng nề như Electron, không cần cài môi trường Python hàng trăm MB — Boogie khởi động trong nháy mắt và ăn rất ít RAM.
+          </p>
+        </div>
+
+        <div class="perf-grid">
+          <div class="glass-card chart-card">
+            <h3 data-i18n="perf.chart1">Tốc độ khởi động, RAM &amp; Dung lượng</h3>
+            <img src="assets/perf_comparison.svg" alt="Performance Comparison Chart" loading="lazy" />
+          </div>
+          <div class="glass-card chart-card">
+            <h3 data-i18n="perf.chart2">Độ trễ phản hồi giọng nói trực tiếp</h3>
+            <img src="assets/latency_comparison.svg" alt="Voice Latency Comparison Chart" loading="lazy" />
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Changelog -->
+    <section class="section section-alt" id="changelog">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-eyebrow" data-i18n="cl.eyebrow">LỊCH SỬ PHIÊN BẢN</span>
+          <h2 class="section-title" data-i18n="cl.title">Changelog</h2>
+        </div>
+
+        <div class="changelog-list">
+          <article class="glass-card cl-card">
+            <div class="cl-head">
+              <div class="cl-version-wrap">
+                <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.2.0" target="_blank" rel="noopener" class="cl-tag">v0.2.0</a>
+                <span class="cl-badge" data-i18n="cl.latest">Mới nhất</span>
+              </div>
+              <span class="cl-date">2026-11-23</span>
+            </div>
+            <ul class="cl-items" id="cl-v020"></ul>
+          </article>
+
+          <article class="glass-card cl-card">
+            <div class="cl-head">
+              <div class="cl-version-wrap">
+                <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.1.0" target="_blank" rel="noopener" class="cl-tag secondary">v0.1.0</a>
+              </div>
+              <span class="cl-date">2026-11-22</span>
+            </div>
+            <ul class="cl-items" id="cl-v010"></ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- FAQ & Contact Section -->
+    <section class="section" id="contact">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-eyebrow" data-i18n="faq.eyebrow">HỖ TRỢ &amp; LIÊN HỆ</span>
+          <h2 class="section-title" data-i18n="faq.title">Câu hỏi thường gặp &amp; Góp ý</h2>
+        </div>
+
+        <div class="faq-list" id="faq-list"></div>
+
+        <div class="contact-grid">
+          <a href="https://github.com/thodark/Boogie-AI-Assistant/issues/new" target="_blank" rel="noopener" class="glass-card contact-card">
+            <div class="contact-icon">🐞</div>
+            <h3 data-i18n="contact.bugTitle">Báo lỗi &amp; Đề xuất tính năng</h3>
+            <p data-i18n="contact.bugDesc">Gặp lỗi hoặc muốn thêm tính năng mới? Mở một GitHub Issue — tác giả sẽ xem và cập nhật trực tiếp.</p>
+            <span class="contact-link">GitHub Issues ↗</span>
+          </a>
+
+          <a href="mailto:itsyoei72@gmail.com?subject=Boogie%20AI%20Assistant%20Feedback" class="glass-card contact-card">
+            <div class="contact-icon">✉️</div>
+            <h3 data-i18n="contact.emailTitle">Liên hệ qua Email</h3>
+            <p data-i18n="contact.emailDesc">Gửi góp ý, báo lỗi (đính kèm <code>boogie.log</code>) hoặc trao đổi hợp tác trực tiếp với tác giả.</p>
+            <span class="contact-link">itsyoei72@gmail.com ↗</span>
+          </a>
+
+          <button type="button" class="glass-card contact-card contact-copy-card" data-copy-value="darkx_daddy">
+            <div class="contact-icon">💬</div>
+            <h3 data-i18n="contact.discordTitle">Nhắn trực tiếp qua Discord</h3>
+            <p data-i18n="contact.discordDesc">Cần hỗ trợ nhanh cài đặt hoặc góp ý tính năng mới? Bấm vào thẻ này để sao chép username Discord.</p>
+            <span class="contact-link">darkx_daddy · <span data-i18n="common.copy">Sao chép</span></span>
+          </button>
+
+          <a href="https://github.com/thodark/Boogie-AI-Assistant" target="_blank" rel="noopener" class="glass-card contact-card">
+            <div class="contact-icon">⭐</div>
+            <h3 data-i18n="contact.authorTitle">Tác giả — Suyz Nguyen</h3>
+            <p data-i18n="contact.authorDesc">Dự án mã nguồn mở phát triển bởi Suyz Nguyen. Xem mã nguồn Rust hoặc tặng 1 Star ủng hộ trên GitHub!</p>
+            <span class="contact-link">github.com/thodark ↗</span>
+          </a>
+        </div>
+
+        <div class="glass-card report-advice">
+          <strong data-i18n="contact.adviceTitle">💡 Khuyến nghị khi gửi báo lỗi để được hỗ trợ nhanh nhất:</strong>
+          <ul>
+            <li data-i18n="contact.a1">Cho biết phiên bản Windows (10 hay 11) và phiên bản Boogie bạn đang dùng (xem góc phải cửa sổ Settings).</li>
+            <li data-i18n="contact.a2">Đính kèm file nhật ký <code>config/boogie.log</code> (file này chỉ ghi log lỗi kỹ thuật, <strong>không chứa</strong> Gemini API key của bạn).</li>
+            <li data-i18n="contact.a3">Mô tả ngắn bạn vừa nói câu gì hoặc bấm vào đâu trước khi xảy ra lỗi.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/logo_icon.png" alt="Boogie" class="brand-icon sm" />
+        <span><strong>Boogie</strong> · <span data-i18n="footer.credit">Tạo bởi Suyz Nguyen · Giấy phép MIT</span></span>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/thodark/Boogie-AI-Assistant" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/thodark/Boogie-AI-Assistant/releases" target="_blank" rel="noopener">Releases</a>
+        <a href="https://github.com/thodark/Boogie-AI-Assistant/issues" target="_blank" rel="noopener">Issues</a>
+        <a href="#top" data-i18n="footer.top">Lên đầu trang ↑</a>
+      </div>
+    </div>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
