@@ -692,6 +692,10 @@
   function applyLanguage(lang) {
     currentLang = lang === "en" ? "en" : "vi";
     document.documentElement.lang = currentLang;
+    document.title =
+      currentLang === "en"
+        ? "Boogie — Native Rust Voice AI Assistant for Windows"
+        : "Boogie — Trợ Lý AI Giọng Nói Cho Windows | Native Rust Voice AI";
     localStorage.setItem("boogie_lang", currentLang);
 
     document.querySelectorAll(".lang-btn").forEach((b) => {
