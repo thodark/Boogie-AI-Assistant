@@ -946,6 +946,7 @@ async fn run_session(
         let mut turn_audio_bytes: usize = 0;
         let mut turn_output_chars: usize = 0;
         let mut pending_vision_audio_check = false;
+        let mut vision_audio_retries: u8 = 0;
         let mut tools_in_flight: usize = 0;
         let mut deferred_refresh = false;
         let mut last_sent_audio_level: f32 = -1.0;
@@ -1138,6 +1139,7 @@ async fn run_session(
                                 tracing::info!(
                                     "executing deferred session refresh after interruption"
                                 );
+                                shared.lock().await.resume_handle = None;
                                 immediate_reconnect = true;
                                 break;
                             }
@@ -1153,7 +1155,8 @@ async fn run_session(
                             }
                             let missed_vision_audio = pending_vision_audio_check
                                 && turn_audio_bytes == 0
-                                && turn_output_chars > 0;
+                                && vision_audio_retries < 1;
+                            let had_text = turn_output_chars > 0;
                             pending_vision_audio_check = false;
                             turn_audio_bytes = 0;
                             turn_output_chars = 0;
@@ -1161,15 +1164,19 @@ async fn run_session(
                             awaiting_response_since = None;
                             response_timer = None;
                             if missed_vision_audio {
+                                vision_audio_retries += 1;
                                 tracing::warn!(
-                                    "Gemini Live emitted text-only vision reply with 0 audio bytes — nudging spoken readback"
+                                    "Gemini Live vision turn ended with 0 audio bytes (had_transcript={had_text}) — nudging spoken readback"
                                 );
+                                let nudge = if had_text {
+                                    "Hãy đọc to câu trả lời vừa rồi thành tiếng thật tự nhiên và ngắn gọn (không đọc ký hiệu LaTeX hay markdown)."
+                                } else {
+                                    "Hãy nhìn kỹ ảnh màn hình vừa gửi và trả lời câu hỏi của người dùng thành tiếng bằng giọng nói tự nhiên, ngắn gọn (không dùng LaTeX hay markdown)."
+                                };
                                 let now = Instant::now();
                                 awaiting_response_since = Some(now);
                                 response_timer = Some(now);
-                                let _ = session
-                                    .send_text("Hãy đọc to câu trả lời vừa rồi thành tiếng thật tự nhiên và ngắn gọn (không dùng LaTeX hay markdown).")
-                                    .await;
+                                let _ = session.send_text(nudge).await;
                                 continue;
                             }
                             saw_untrusted_in_turn = false;
@@ -1181,6 +1188,7 @@ async fn run_session(
                                 tracing::info!(
                                     "executing deferred session refresh after turn complete"
                                 );
+                                shared.lock().await.resume_handle = None;
                                 immediate_reconnect = true;
                                 break;
                             }
@@ -1209,18 +1217,21 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::GoAway { time_left } => {
+                            // Clear expiring resume handle so the refreshed session starts cleanly
+                            // with a full lifetime instead of immediately triggering another GoAway / 1008.
+                            shared.lock().await.resume_handle = None;
                             if model_turn_active
                                 || tools_in_flight > 0
                                 || awaiting_response_since.is_some()
                             {
                                 tracing::info!(
-                                    "Gemini GoAway ({:?}) — deferring refresh until current turn/tool finishes",
+                                    "Gemini GoAway ({:?}) — deferring fresh session reconnect until current turn/tool finishes",
                                     time_left
                                 );
                                 deferred_refresh = true;
                             } else {
                                 tracing::info!(
-                                    "Gemini GoAway ({:?}) — refreshing session cleanly",
+                                    "Gemini GoAway ({:?}) — refreshing session cleanly (fresh handle)",
                                     time_left
                                 );
                                 let _ =
@@ -1265,6 +1276,7 @@ async fn run_session(
                     if has_silent_vision {
                         ignore_next_silent_turn_complete += 1;
                         pending_vision_audio_check = true;
+                        vision_audio_retries = 0;
                         turn_audio_bytes = 0;
                         turn_output_chars = 0;
                     }
@@ -1544,12 +1556,20 @@ async fn execute_tool_isolated(
         }
     };
 
-    tracing::info!(
-        "tool '{}' finished in {}ms (ok={})",
-        name,
-        started.elapsed().as_millis(),
-        !result.is_error
-    );
+    if result.is_error {
+        tracing::warn!(
+            "tool '{}' finished in {}ms (ok=false): {}",
+            name,
+            started.elapsed().as_millis(),
+            truncate_chars(&result.output, 320)
+        );
+    } else {
+        tracing::info!(
+            "tool '{}' finished in {}ms (ok=true)",
+            name,
+            started.elapsed().as_millis()
+        );
+    }
     result
 }
 

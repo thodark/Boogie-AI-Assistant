@@ -807,9 +807,20 @@ async fn generate_document_handler(
     match render_res {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
+            tracing::error!(
+                "generate_document render failed ({}): {e}",
+                format.display_name()
+            );
+            let _ = event_tx.send(AppEvent::Log(format!(
+                "Failed to render {}: {e}",
+                format.display_name()
+            )));
             return ToolResult::err(format!("Failed to render {}: {e}", format.display_name()));
         }
-        Err(e) => return ToolResult::err(format!("Document render task failed: {e}")),
+        Err(e) => {
+            tracing::error!("generate_document render task panicked: {e}");
+            return ToolResult::err(format!("Document render task failed: {e}"));
+        }
     }
 
     let path_str = chosen_path.display().to_string();
@@ -1614,35 +1625,176 @@ pub fn build_document_html(spec: &DocumentSpec) -> String {
     )
 }
 
-pub fn find_chromium_binary() -> Option<PathBuf> {
+/// Returns installed Chromium-family browsers in best reliability order for headless PDF printing:
+/// Google Chrome first (fast ~1.4s, no Edge StartupBoost/FirstLaunch relaunch quirk),
+/// then Microsoft Edge (preinstalled on every Windows 10/11 PC), then Brave as final fallback.
+pub fn find_chromium_binaries() -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = vec![
-        PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-        PathBuf::from(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
         PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
         PathBuf::from(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        PathBuf::from(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
         PathBuf::from(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
     ];
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         let base = PathBuf::from(local);
-        candidates.push(base.join(r"Microsoft\Edge\Application\msedge.exe"));
         candidates.push(base.join(r"Google\Chrome\Application\chrome.exe"));
+        candidates.push(base.join(r"Microsoft\Edge\Application\msedge.exe"));
         candidates.push(base.join(r"BraveSoftware\Brave-Browser\Application\brave.exe"));
     }
-    candidates.into_iter().find(|p| p.is_file())
+    let mut found = Vec::new();
+    for path in candidates {
+        if path.is_file() && !found.contains(&path) {
+            found.push(path);
+        }
+    }
+    found
 }
 
-/// Renders a crisp UTF-8 Vietnamese PDF using Windows' built-in Edge/Chrome headless print engine.
+fn wait_for_valid_pdf(path: &Path, max_wait: std::time::Duration) -> Option<Vec<u8>> {
+    let deadline = std::time::Instant::now() + max_wait;
+    let mut last_len: Option<usize> = None;
+    loop {
+        if let Ok(bytes) = std::fs::read(path)
+            && bytes.len() >= 100
+            && bytes.starts_with(b"%PDF-")
+        {
+            if last_len == Some(bytes.len())
+                || bytes.windows(5).rev().take(64).any(|w| w == b"%%EOF")
+            {
+                return Some(bytes);
+            }
+            last_len = Some(bytes.len());
+        }
+        if std::time::Instant::now() >= deadline {
+            if let Ok(bytes) = std::fs::read(path)
+                && bytes.len() >= 100
+                && bytes.starts_with(b"%PDF-")
+            {
+                return Some(bytes);
+            }
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
+
+fn try_render_pdf_with_browser(
+    browser: &Path,
+    html_url: &str,
+    temp_pdf: &Path,
+    profile_dir: &Path,
+) -> Result<Vec<u8>, String> {
+    let _ = std::fs::remove_file(temp_pdf);
+
+    let mut cmd = std::process::Command::new(browser);
+    cmd.args([
+        "--headless=new",
+        "--disable-gpu",
+        "--no-sandbox",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-sync",
+        "--disable-features=msEdgeSidebarV2,EdgeShoppingAssistant,msEdgeStartupBoost",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--no-pdf-header-footer",
+        &format!("--user-data-dir={}", profile_dir.display()),
+        &format!("--print-to-pdf={}", temp_pdf.display()),
+        html_url,
+    ])
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to launch {}: {e}", browser.display()))?;
+
+    // Hard 16s timeout so a busy/already-running browser (e.g. Brave) never hangs PDF export.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(16);
+    let mut exit_code: Option<i32> = None;
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_code = status.code();
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    timed_out = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!("wait failed: {e}"));
+            }
+        }
+    }
+
+    let stderr_text = child
+        .stderr
+        .take()
+        .and_then(|mut s| {
+            use std::io::Read as _;
+            let mut buf = String::new();
+            s.read_to_string(&mut buf).ok().map(|_| buf)
+        })
+        .unwrap_or_default();
+
+    // Microsoft Edge on Windows can re-launch a detached child on first profile boot and exit the
+    // parent process ~2-3s before the PDF file finishes flushing. Wait up to 6s BEFORE deleting
+    // the temp HTML or giving up!
+    let wait_budget = if timed_out {
+        std::time::Duration::from_millis(200)
+    } else {
+        std::time::Duration::from_secs(6)
+    };
+    let pdf_bytes = wait_for_valid_pdf(temp_pdf, wait_budget);
+
+    let _ = std::fs::remove_file(temp_pdf);
+    let _ = std::fs::remove_dir_all(profile_dir);
+
+    match pdf_bytes {
+        Some(bytes) => Ok(bytes),
+        None => Err(format!(
+            "{} did not produce a valid PDF (timeout={timed_out}, exit={exit_code:?}): {}",
+            browser
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("browser"),
+            crate::util::truncate_chars(stderr_text.trim(), 200)
+        )),
+    }
+}
+
+/// Renders a crisp UTF-8 Vietnamese PDF using installed Chromium browsers (Chrome → Edge → Brave).
+/// Always prints to a clean ASCII temp PDF first, waits for Edge detached-process flushes, and
+/// then writes to the user's chosen Unicode/OneDrive destination with clear lock-error reporting.
 pub fn render_pdf(spec: &DocumentSpec, output_path: &Path) -> Result<(), String> {
-    let browser = find_chromium_binary().ok_or_else(|| {
-        "No Microsoft Edge / Chrome / Brave browser found for PDF printing. Please save as Word (.docx) instead."
-            .to_string()
-    })?;
+    let browsers = find_chromium_binaries();
+    if browsers.is_empty() {
+        return Err(
+            "No Chrome / Microsoft Edge / Brave browser found for PDF printing. Please save as Word (.docx) instead."
+                .to_string(),
+        );
+    }
 
     let seq = TEMP_DOC_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     let temp_dir = std::env::temp_dir();
     let html_path = temp_dir.join(format!("boogie_doc_{pid}_{seq}.html"));
-    let profile_dir = temp_dir.join(format!("boogie_pdf_profile_{pid}_{seq}"));
 
     let html = build_document_html(spec);
     std::fs::write(&html_path, html.as_bytes())
@@ -1656,49 +1808,55 @@ pub fn render_pdf(spec: &DocumentSpec, output_path: &Path) -> Result<(), String>
             .join(output_path)
     };
 
-    let html_url = url::Url::from_file_path(&html_path)
-        .map_err(|_| "failed to convert temp html path to file:// URL".to_string())?
-        .to_string();
+    let html_url = match url::Url::from_file_path(&html_path) {
+        Ok(u) => u.to_string(),
+        Err(_) => {
+            let _ = std::fs::remove_file(&html_path);
+            return Err("failed to convert temp html path to file:// URL".to_string());
+        }
+    };
 
-    let mut cmd = std::process::Command::new(&browser);
-    cmd.args([
-        "--headless=new",
-        "--disable-gpu",
-        "--no-sandbox",
-        "--disable-extensions",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--no-pdf-header-footer",
-        &format!("--user-data-dir={}", profile_dir.display()),
-        &format!("--print-to-pdf={}", abs_out.display()),
-        &html_url,
-    ]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
+    let mut errors = Vec::new();
+    let mut rendered_bytes: Option<Vec<u8>> = None;
+
+    for (idx, browser) in browsers.iter().enumerate() {
+        let temp_pdf = temp_dir.join(format!("boogie_pdf_out_{pid}_{seq}_{idx}.pdf"));
+        let profile_dir = temp_dir.join(format!("boogie_pdf_profile_{pid}_{seq}_{idx}"));
+        match try_render_pdf_with_browser(browser, &html_url, &temp_pdf, &profile_dir) {
+            Ok(bytes) => {
+                rendered_bytes = Some(bytes);
+                break;
+            }
+            Err(e) => {
+                tracing::warn!("render_pdf attempt #{} failed: {e}", idx + 1);
+                errors.push(e);
+            }
+        }
     }
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to launch headless PDF printer: {e}"));
 
     let _ = std::fs::remove_file(&html_path);
-    let _ = std::fs::remove_dir_all(&profile_dir);
 
-    let out = output?;
-    if !abs_out.is_file() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+    let pdf_bytes = rendered_bytes.ok_or_else(|| {
+        format!(
+            "PDF printer failed across {} browser(s): {}",
+            browsers.len(),
+            errors.join(" | ")
+        )
+    })?;
+
+    if let Err(e) = std::fs::write(&abs_out, &pdf_bytes) {
+        let locked_hint = if e.kind() == std::io::ErrorKind::PermissionDenied
+            || e.raw_os_error() == Some(32)
+            || e.raw_os_error() == Some(33)
+        {
+            " (file may currently be open in Foxit/Edge/PDF Reader — close it or pick a new filename)"
+        } else {
+            ""
+        };
         return Err(format!(
-            "PDF printer did not produce output file (exit {:?}): {}",
-            out.status.code(),
-            crate::util::truncate_chars(stderr.trim(), 220)
+            "Could not save PDF to '{}': {e}{locked_hint}",
+            abs_out.display()
         ));
-    }
-
-    let head = std::fs::read(&abs_out).map_err(|e| format!("verify pdf output: {e}"))?;
-    if !head.starts_with(b"%PDF-") {
-        return Err("Generated PDF file header is invalid.".to_string());
     }
 
     Ok(())
@@ -1811,12 +1969,15 @@ mod tests {
 
     #[test]
     fn renders_valid_pdf_when_chromium_is_installed() {
-        if find_chromium_binary().is_none() {
+        if find_chromium_binaries().is_empty() {
             return;
         }
-        let pdf_path = std::env::temp_dir().join(format!("boogie_test_{}.pdf", std::process::id()));
+        let pdf_path = std::env::temp_dir().join(format!(
+            "ĐỀ THI THỬ TIẾNG ANH B2 VSTEP_{}.pdf",
+            std::process::id()
+        ));
         render_pdf(&sample_spec(), &pdf_path)
-            .expect("pdf render via headless Edge/Chrome should succeed");
+            .expect("pdf render via headless Chrome/Edge should succeed with Unicode filename");
         let bytes = std::fs::read(&pdf_path).unwrap();
         assert!(bytes.starts_with(b"%PDF-"));
         assert!(bytes.len() > 2000);

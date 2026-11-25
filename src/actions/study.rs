@@ -190,28 +190,30 @@ fn crop_active_content_rgba(
     .iter()
     .any(|b| lower_title.contains(b));
 
-    let y0 = if is_browser { (h * 72) / 1000 } else { 0 };
+    // Browser tab bar + address bar at 1080p is ~96-102px (~9.4% of screen height).
+    let y0 = if is_browser { (h * 94) / 1000 } else { 0 };
     let y1 = h.saturating_sub((h * 46) / 1000);
     if y1 <= y0 + (h * 60) / 100 {
         return None;
     }
 
     // A gutter column is mostly a flat background color (even if 1-2 floating icons like a Zalo
-    // chat button or TOC icon sit inside the margin, >= 78% of vertical samples still match the
-    // column's top/bottom gutter color!).
+    // chat button, TOC widget, or bottom back-to-top arrow sit inside the margin, >= 79% of
+    // vertical samples still match the column's upper-middle or lower-middle gutter color!).
+    let span = (y1 - y0).max(1);
+    let ref_y1 = y0 + span / 3;
+    let ref_y2 = y0 + (span * 2) / 3;
     let is_gutter_col = |x: u32| -> bool {
-        let top_idx = ((y0 as usize) * (w as usize) + (x as usize)) * 4;
-        let bot_idx = (((y1 - 1) as usize) * (w as usize) + (x as usize)) * 4;
-        let ref_r = raw[top_idx];
-        let ref_g = raw[top_idx + 1];
-        let ref_b = raw[top_idx + 2];
-        // Also allow matching bottom pixel in case top pixel hits a header corner
-        let ref2_r = raw[bot_idx];
-        let ref2_g = raw[bot_idx + 1];
-        let ref2_b = raw[bot_idx + 2];
+        let idx1 = ((ref_y1 as usize) * (w as usize) + (x as usize)) * 4;
+        let idx2 = ((ref_y2 as usize) * (w as usize) + (x as usize)) * 4;
+        let ref_r = raw[idx1];
+        let ref_g = raw[idx1 + 1];
+        let ref_b = raw[idx1 + 2];
+        let ref2_r = raw[idx2];
+        let ref2_g = raw[idx2 + 1];
+        let ref2_b = raw[idx2 + 2];
 
         let samples = 24u32;
-        let span = (y1 - y0).max(1);
         let mut match1 = 0u32;
         let mut match2 = 0u32;
         for s in 0..samples {
@@ -231,13 +233,23 @@ fn crop_active_content_rgba(
     };
 
     let max_side_trim = (w * 20) / 100;
-    let mut x0 = 0u32;
+    // Skip 4px left window edge and 22px right browser scrollbar so scrollbar thumbs never block
+    // side-gutter detection on web exam pages.
+    let start_x0 = if is_browser { 4u32 } else { 0u32 };
+    let mut x0 = start_x0;
     while x0 + 8 <= max_side_trim && is_gutter_col(x0) {
         x0 += 8;
     }
-    let mut x1 = w;
+    if x0 == start_x0 {
+        x0 = 0;
+    }
+    let start_x1 = if is_browser { w.saturating_sub(22) } else { w };
+    let mut x1 = start_x1;
     while w - x1 + 8 <= max_side_trim && x1 > x0 + 8 && is_gutter_col(x1 - 1) {
         x1 -= 8;
+    }
+    if x1 == start_x1 && !is_browser {
+        x1 = w;
     }
     // Leave a tiny 12px breathing margin around detected text edge
     x0 = x0.saturating_sub(12);
@@ -1337,6 +1349,50 @@ mod tests {
         assert!((1200..1500).contains(&cw), "unexpected cropped width {cw}");
         assert!((850..980).contains(&ch), "unexpected cropped height {ch}");
         assert_eq!(cropped.len(), (cw as usize) * (ch as usize) * 4);
+
+        // Simulate realistic 100px browser address bar, 18px right scrollbar with thumb, and
+        // floating left/right widgets (e.g. TOC / Zalo / back-to-top icons) on light gutters.
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y * w + x) * 4) as usize;
+                let (r, g, b) = if y < 100 {
+                    (40, 42, 48) // dark browser tabs + address bar
+                } else if x >= w - 18 {
+                    if (200..420).contains(&y) {
+                        (120, 120, 125) // scrollbar thumb
+                    } else {
+                        (55, 55, 60) // scrollbar track
+                    }
+                } else if (300..1620).contains(&x) {
+                    // dense alternating text rows
+                    if y % 12 < 6 {
+                        (20, 20, 30)
+                    } else {
+                        (252, 252, 255)
+                    }
+                } else if (24..88).contains(&x)
+                    && ((240..310).contains(&y) || (950..1020).contains(&y))
+                {
+                    (30, 30, 35) // floating TOC & back-to-top widgets
+                } else {
+                    (242, 244, 248) // light page gutter
+                };
+                rgba[idx] = r;
+                rgba[idx + 1] = g;
+                rgba[idx + 2] = b;
+                rgba[idx + 3] = 255;
+            }
+        }
+        let (_, cw2, ch2) = crop_active_content_rgba(&rgba, w, h, "Tổng hợp đề thi - Brave")
+            .expect("should trim gutters past scrollbar and floating widgets");
+        assert!(
+            (1280..1450).contains(&cw2),
+            "scrollbar blocked crop: cw2={cw2}"
+        );
+        assert!(
+            (900..960).contains(&ch2),
+            "browser chrome trim off: ch2={ch2}"
+        );
     }
 
     #[test]

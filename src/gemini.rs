@@ -204,6 +204,15 @@ impl LiveSession {
                 {
                     tracing::trace!("audio chunk: {} bytes", pcm.len());
                     let _ = tx.send(GeminiEvent::Audio(pcm)).await;
+                } else if let Some(txt) = part.get("text").and_then(|t| t.as_str()) {
+                    let is_thought = part
+                        .get("thought")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    tracing::debug!(
+                        "modelTurn text part (thought={is_thought}): {}",
+                        truncate_chars(txt, 140)
+                    );
                 }
             }
         }

@@ -8,7 +8,7 @@
 Powered by Gemini Live API, a 60 FPS 3D Liquid Glass GLSL orb, interactive Study Visual board, and Document Studio.
 
 <p>
-  <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest"><strong>Download v0.4.4</strong></a>
+  <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest"><strong>Download v0.4.5</strong></a>
   &nbsp;·&nbsp;
   <a href="https://thodark.github.io/Boogie-AI-Assistant/">Website &amp; Guide (VI / EN)</a>
   &nbsp;·&nbsp;
@@ -57,8 +57,8 @@ No Rust, Python, or installer required. Grab the latest Windows 10 / 11 (64-bit)
 
 | Artifact | Size | Contents | Link |
 | :--- | :---: | :--- | :--- |
-| **`Boogie-v0.4.4-Windows-x64.zip`** | `11.9 MB` | **Recommended** — `Boogie-v0.4.4.exe`, config template, `README.md`, `LICENSE` | [Download ZIP](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.4-Windows-x64.zip) |
-| **`Boogie-v0.4.4.exe`** | `32.2 MB` | Standalone portable executable with embedded Windows version info | [Download EXE](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.4.exe) |
+| **`Boogie-v0.4.5-Windows-x64.zip`** | `11.9 MB` | **Recommended** — `Boogie-v0.4.5.exe`, config template, `README.md`, `LICENSE` | [Download ZIP](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.5-Windows-x64.zip) |
+| **`Boogie-v0.4.5.exe`** | `32.2 MB` | Standalone portable executable with embedded Windows version info | [Download EXE](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.5.exe) |
 | **`SHA256SUMS.txt`** | `182 B` | Official SHA-256 release checksums | [View Checksums](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/SHA256SUMS.txt) |
 
 ---
@@ -66,7 +66,7 @@ No Rust, Python, or installer required. Grab the latest Windows 10 / 11 (64-bit)
 ## Quick Start
 
 1. **Get a free Gemini API key** at [Google AI Studio](https://aistudio.google.com/apikey) (`AIza...`).
-2. **Launch `Boogie-v0.4.4.exe`** (extract the ZIP anywhere, or run the standalone `.exe`).
+2. **Launch `Boogie-v0.4.5.exe`** (extract the ZIP anywhere, or run the standalone `.exe`).
 3. **Complete Setup** — paste your key, pick a graphics tier (`Low` for integrated GPUs, `High` for dedicated GPUs), choose a theme & voice, and click **Save & Connect**.
 
 Your API key and memories are stored locally in `%APPDATA%\Boogie\` and only connect directly to Google's Gemini endpoints. Open the top-right **Settings** gear anytime to hot-reload settings without restarting.
@@ -77,7 +77,7 @@ Your API key and memories are stored locally in `%APPDATA%\Boogie\` and only con
 - **Windows SmartScreen:** Because open-source releases are not signed with a paid EV certificate, Windows may show *"Windows protected your PC"*. Verify the SHA-256 hash below, then click **More info → Run anyway**.
 - **Verify Checksum (PowerShell):**
   ```powershell
-  Get-FileHash .\Boogie-v0.4.4-Windows-x64.zip -Algorithm SHA256
+  Get-FileHash .\Boogie-v0.4.5-Windows-x64.zip -Algorithm SHA256
   ```
 - **Upgrade Persistence & USB Portable Mode:** By default, Boogie stores `api_keys.json`, `memory.json`, `long_term.json`, and `boogie.log` in `%APPDATA%\Boogie\` (automatically migrating legacy `v0.1–v0.3` files from `<exe_dir>\config\` on first launch). Create an empty `portable.txt` next to the `.exe` if you prefer local `<exe_dir>\config\` storage.
 - **Diagnostics:** Set `RUST_LOG=boogie=debug` for verbose trace logging (defaults to `boogie=info`).
@@ -158,6 +158,11 @@ flowchart LR
 ---
 
 ## Changelog
+
+### [`v0.4.5`](https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.4.5) — 2026-11-26
+- **Bulletproof Headless PDF Export (`documents.rs`):** Fixed a race condition where Microsoft Edge's first-launch relaunch process exited early before flushing the PDF — `render_pdf` now prints to an ASCII temp file first, waits up to 6 s for `%PDF-` stabilization before cleaning up temp HTML, enforces a 16 s per-browser timeout, automatically cascades across **Chrome → Edge → Brave**, and clearly reports file-lock errors (e.g. PDF already open in Foxit/Edge).
+- **Zero-Audio Vision Guard, Clean `GoAway` Refresh & Error Logging (`main.rs`):** Extended the spoken readback guard to catch silent empty/thought-only vision turns (not just text-only turns), cleared expiring `resume_handle` on `GoAway` to eliminate `code=1008` disconnects 50 s after refresh, and logged full tool error details in `boogie.log`.
+- **Scrollbar-Safe Smart Content Crop (`study.rs`):** Raised browser top-chrome trim to 9.4% (past Brave/Chrome's full address bar) and skipped the 22 px right scrollbar & corner widgets so exam pages crop cleanly down to the text column.
 
 ### [`v0.4.4`](https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.4.4) — 2026-11-26
 - **Fixed Missing Voice Audio on High-Res Screen Answers (`study.rs`, `screen.rs`, `main.rs`):** Replaced bracketed protocol tags inside `clientContent` image turns (which triggered Gemini 3.1 Live's text-only LaTeX bug with 0 audio bytes) with natural spoken-language instructions, verified 5/5 spoken audio playback (~0.83–2.0 s first audio), AND added an automatic zero-audio self-healing readback guard in `main.rs` so Boogie always speaks answers aloud.

@@ -21,11 +21,11 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Liên hệ",
       "nav.cta": "Tải ngay",
-      "hero.badge": "Mới v0.4.4: Vision 1,120-token thật — đọc chuẩn & phát giọng nói 100% (~1s, 0 tốn quota REST)",
+      "hero.badge": "Mới v0.4.5: Xuất PDF chống lỗi Edge (Chrome → Edge), tự nhắc đọc tiếng mọi lượt Vision & chống rớt GoAway",
       "hero.title": 'Trợ lý AI giọng nói <span class="gradient-text">kiểu JARVIS</span> ngay trên Windows của bạn.',
       "hero.subtitle": "Tải về là chạy ngay — không cần cài đặt phức tạp, không cần biết code. Nói chuyện tự nhiên tiếng Việt / Anh với phản hồi ~0.58 giây, bảng dạy học tương tác Study Visual (đồ thị, sơ đồ, Art Study), xuất đề cương PDF/Word/Excel có hộp thoại chọn chỗ lưu, điều khiển 46 tác vụ Windows và trí nhớ thông minh.",
       "hero.downloadZip": "Tải cho Windows (ZIP — Khuyên dùng)",
-      "hero.downloadExe": "Bản Portable 1 file (Boogie-v0.4.4.exe)",
+      "hero.downloadExe": "Bản Portable 1 file (Boogie-v0.4.5.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
       "hero.trust2": "Không cần Rust, Cargo hay Python",
       "hero.trust3": "Chạy Portable không cần cài",
@@ -43,7 +43,7 @@
       "download.zipDesc": "Gói Portable đầy đủ gồm file <code>.exe</code> kèm số phiên bản, mẫu cấu hình, hướng dẫn và giấy phép MIT. Xóa thư mục bản cũ tải bản mới vẫn giữ nguyên 100% API key và trí nhớ!",
       "download.exeDesc": "Bản chạy thẳng 1 tệp duy nhất có kèm số phiên bản trên tên file (vd: <code>Boogie-v0.4.0.exe</code>). API key, cấu hình và bộ nhớ lưu bền vững trong <code>%APPDATA%\\Boogie\\</code> nên đổi bản mới không lo mất dữ liệu.",
       "download.zipBtn": "Tải gói ZIP",
-      "download.exeBtn": "Tải Boogie-v0.4.4.exe",
+      "download.exeBtn": "Tải Boogie-v0.4.5.exe",
       "sha.title": "Kiểm tra mã toàn vẹn SHA-256",
       "sha.desc": "Đối chiếu mã SHA-256 sau khi tải để chắc chắn 100% file nguyên bản từ GitHub Releases và không bị chỉnh sửa.",
       "sha.fileCol": 'Tệp phát hành (<span id="sha-release-tag">latest</span>)',
@@ -121,11 +121,11 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Contact",
       "nav.cta": "Download",
-      "hero.badge": "New in v0.4.4: True 1,120-Token Live Vision with 100% Reliable Spoken Audio (~1s, Zero REST Quota)",
+      "hero.badge": "New in v0.4.5: Bulletproof PDF Export (Chrome → Edge), Zero-Audio Vision Guard & Clean GoAway Refresh",
       "hero.title": 'A <span class="gradient-text">JARVIS-style</span> real-time voice AI assistant for Windows.',
       "hero.subtitle": "Download and run instantly — no installer, no Rust or Python, no coding required. Talk naturally in English or Vietnamese (~0.58s TTFB), open an interactive split-screen Study Visual & Art Study board, export PDF/Word/Excel study guides with a mandatory Windows Save As picker, and automate 46 Windows tools.",
       "hero.downloadZip": "Download for Windows (ZIP — Recommended)",
-      "hero.downloadExe": "Portable Single File (Boogie-v0.4.4.exe)",
+      "hero.downloadExe": "Portable Single File (Boogie-v0.4.5.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
       "hero.trust2": "No Rust, Cargo, or Python needed",
       "hero.trust3": "Portable — zero installation",
@@ -143,7 +143,7 @@
       "download.zipDesc": "Complete bundle with the versioned <code>.exe</code>, example config, README, and MIT License. Delete old folders anytime when upgrading — your API key and memories stay safe!",
       "download.exeDesc": "Standalone single executable clearly labeled with its version (e.g. <code>Boogie-v0.4.0.exe</code>). API key, settings, and memories are stored persistently in <code>%APPDATA%\\Boogie\\</code> across upgrades.",
       "download.zipBtn": "Download ZIP Bundle",
-      "download.exeBtn": "Download Boogie-v0.4.4.exe",
+      "download.exeBtn": "Download Boogie-v0.4.5.exe",
       "sha.title": "Verify Release Integrity (SHA-256)",
       "sha.desc": "Compare your downloaded file's SHA-256 hash to guarantee it came untouched from official GitHub Releases.",
       "sha.fileCol": 'Release file (<span id="sha-release-tag">latest</span>)',
@@ -528,6 +528,18 @@
   ];
 
   const CHANGELOG = {
+    v045: {
+      vi: [
+        "<strong>Sửa triệt để lỗi xuất PDF thất bại do Microsoft Edge tự tách tiến trình:</strong> Chuyển cơ chế in PDF sang xuất tệp tạm ASCII, chờ ổn định header <code>%PDF-</code> trước khi dọn HTML, thêm timeout cứng 16 giây, tự động dự phòng theo chuỗi <strong>Chrome → Edge → Brave</strong> và báo rõ nếu file PDF đang bị mở khóa bởi Foxit/Edge.",
+        "<strong>Chống im lặng mọi lượt Vision, sửa rớt kết nối <code>GoAway / 1008</code> &amp; ghi log lỗi chi tiết:</strong> Mở rộng cơ chế tự nhắc đọc thành tiếng cho cả lượt rỗng 0 byte âm thanh, xóa <code>resume_handle</code> hết hạn khi nhận <code>GoAway</code> để nối lại phiên mới tinh không bị đá sau 50 giây, và ghi đầy đủ lý do lỗi tool vào <code>boogie.log</code>.",
+        "<strong>Smart Crop xuyên thanh cuộn trình duyệt:</strong> Cắt sạch toàn bộ thanh địa chỉ trình duyệt (9.4%) và bỏ qua thanh cuộn 22px bên phải để gom gọn đề bài tối đa độ nét.",
+      ],
+      en: [
+        "<strong>Bulletproof Headless PDF Export (Chrome → Edge → Brave):</strong> Fixed a Windows Microsoft Edge early-exit race where temp HTML was deleted before PDF flush — prints to an ASCII temp file first, waits for <code>%PDF-</code> stabilization, enforces a 16s per-browser timeout, cascades across installed Chromium browsers, and clearly reports file locks (e.g. open in Foxit/Edge).",
+        "<strong>Zero-Audio Vision Guard, Clean <code>GoAway</code> Refresh &amp; Full Tool Error Logs:</strong> Catches empty/thought-only 0-audio vision turns to nudge spoken answers, clears expiring <code>resume_handle</code> on <code>GoAway</code> to prevent <code>code=1008</code> disconnects 50s later, and logs full error messages in <code>boogie.log</code>.",
+        "<strong>Scrollbar-Safe Smart Crop:</strong> Raised browser chrome trim to 9.4% and skipped the right scrollbar so exam pages crop tightly to the question column.",
+      ],
+    },
     v044: {
       vi: [
         "<strong>Sửa triệt để lỗi chỉ hiện đáp án qua khung chat mà không đọc thành tiếng:</strong> Thay prompt thẻ ngoặc vuông (dễ kích hoạt lỗi xuất LaTeX 0 byte âm thanh của Gemini 3.1 Live) bằng lời nhắc nói tự nhiên và bổ sung cơ chế tự phát hiện lượt không có âm thanh trong <code>main.rs</code> để đảm bảo Boogie luôn đọc đáp án thành tiếng rõ ràng (~0.8–2s).",
@@ -816,6 +828,7 @@
   }
 
   function renderChangelog() {
+    const v045 = document.getElementById("cl-v045");
     const v044 = document.getElementById("cl-v044");
     const v043 = document.getElementById("cl-v043");
     const v042 = document.getElementById("cl-v042");
@@ -824,6 +837,7 @@
     const v030 = document.getElementById("cl-v030");
     const v020 = document.getElementById("cl-v020");
     const v010 = document.getElementById("cl-v010");
+    if (v045) v045.innerHTML = CHANGELOG.v045[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v044) v044.innerHTML = CHANGELOG.v044[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v043) v043.innerHTML = CHANGELOG.v043[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v042) v042.innerHTML = CHANGELOG.v042[currentLang].map((li) => `<li>${li}</li>`).join("");
@@ -888,7 +902,7 @@
     syncReleaseTagText();
   }
 
-  let latestTagText = "v0.4.4";
+  let latestTagText = "v0.4.5";
   function syncReleaseTagText() {
     const shaTag = document.getElementById("sha-release-tag");
     if (shaTag) shaTag.textContent = latestTagText;
@@ -905,7 +919,7 @@
       });
       if (!res.ok) throw new Error("release fetch failed");
       const rel = await res.json();
-      const tag = rel.tag_name || "v0.4.4";
+      const tag = rel.tag_name || "v0.4.5";
       latestTagText = tag;
 
       ["nav-version", "hero-release-tag", "card-zip-version", "card-exe-version", "sha-release-tag"].forEach((id) => {
