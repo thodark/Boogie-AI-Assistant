@@ -14,9 +14,9 @@ use super::{param, tool};
 
 const PRO_MODEL: &str = "gemini-3.1-pro-preview";
 const FLASH_MODEL: &str = "gemini-2.5-flash";
-// Live-verified fast REST models (avoids retired 2.0-* 404s and slow-hanging preview models).
-// If both hit quota/503, callers drop instantaneously into zero-quota Direct Live Vision / Direct Board mode!
-const FAST_FALLBACK_MODELS: &[&str] = &[FLASH_MODEL, "gemini-3.1-flash-lite"];
+// Only use genuinely fast REST models (removed congested preview/lite endpoints that hung 24s-65s).
+// If FLASH_MODEL hits daily 429 or >14s timeout, callers drop in 0ms into Direct Live Vision / Direct Board!
+const FAST_FALLBACK_MODELS: &[&str] = &[FLASH_MODEL];
 const PRO_RATE_LIMIT_BACKOFF_SECS: u64 = 120;
 const STUDY_MAX_SCREEN_DIM: u32 = 1920;
 const STUDY_MAX_CLIPBOARD_DIM: u32 = 2200;
@@ -32,20 +32,73 @@ fn study_http_client(fast_lane: bool) -> &'static reqwest::Client {
     if fast_lane {
         FAST_HTTP_CLIENT.get_or_init(|| {
             reqwest::Client::builder()
-                .timeout(Duration::from_secs(35))
-                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(12))
+                .connect_timeout(Duration::from_secs(5))
                 .build()
                 .unwrap_or_default()
         })
     } else {
         STUDY_HTTP_CLIENT.get_or_init(|| {
             reqwest::Client::builder()
-                .timeout(Duration::from_secs(65))
-                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(15))
+                .connect_timeout(Duration::from_secs(5))
                 .build()
                 .unwrap_or_default()
         })
     }
+}
+
+fn needs_verified_stem_solver(subject: &str, mode: &str, question: &str) -> bool {
+    if mode == "check" {
+        return true;
+    }
+    if matches!(
+        subject,
+        "math"
+            | "maths"
+            | "toan"
+            | "toán"
+            | "physics"
+            | "vatly"
+            | "lý"
+            | "chemistry"
+            | "hoa"
+            | "hóa"
+            | "calculus"
+            | "algebra"
+            | "geometry"
+            | "statistics"
+    ) {
+        return true;
+    }
+    let q = question.to_lowercase();
+    const STEM_HINTS: &[&str] = &[
+        "toán",
+        "tích phân",
+        "đạo hàm",
+        "phương trình",
+        "bất phương trình",
+        "hệ phương trình",
+        "ma trận",
+        "xác suất",
+        "hình học",
+        "logarit",
+        "lượng giác",
+        "vật lý",
+        "hóa học",
+        "cân bằng phương trình",
+        "tính giá trị",
+        "rút gọn biểu thức",
+        "giải tích",
+        "integral",
+        "derivative",
+        "equation",
+        "matrix",
+        "stoichiometry",
+        "calculus",
+        "solve for x",
+    ];
+    STEM_HINTS.iter().any(|kw| q.contains(kw))
 }
 
 fn is_model_perma_disabled(model: &str) -> bool {
@@ -317,15 +370,15 @@ pub(crate) fn capture_screen_png(
         let _ = tx.send(AppEvent::PlayChime(crate::ChimeKind::ScreenCaptured));
     }
     let (orig_w, orig_h) = (img.width(), img.height());
-    // High-resolution Q95 JPEG: sharp text & math signs at ~6-8x smaller payload and ~50x faster encode than PNG!
+    // High-resolution Q90 JPEG: razor-sharp text & math signs at ~2x smaller payload than Q95 -> faster Live Vision upload!
     let (jpg, out_w, out_h) =
-        encode_rgba_to_jpeg(img.as_raw(), orig_w, orig_h, STUDY_MAX_SCREEN_DIM, 95)?;
+        encode_rgba_to_jpeg(img.as_raw(), orig_w, orig_h, STUDY_MAX_SCREEN_DIM, 90)?;
     Ok(CapturedImage {
         bytes: jpg,
         mime_type: "image/jpeg",
         width: out_w,
         height: out_h,
-        source_desc: format!("monitor {idx} ({out_w}x{out_h} crisp Q95 JPEG)"),
+        source_desc: format!("monitor {idx} ({out_w}x{out_h} crisp Q90 JPEG)"),
     })
 }
 
@@ -842,25 +895,37 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
         )
     };
 
-    // 2. Execute reasoning via configured Study Brain mode
-    // - Flash Direct Vision: passes crisp 1920px Q95 JPEG directly into Gemini Live (~1.2s total, ZERO REST quota!)
-    // - Auto (Verified Fast Thinking): thinkingBudget = 512 on multi-model REST cascade (~1.8-3s), with
-    //   automatic zero-quota fallback to Direct Crisp Live Vision if all REST buckets hit 20/day limit!
-    // - Pro 3.1 Deep Thinking: thinkingBudget = 2048 on Pro -> fast cascade -> Direct Crisp Live Vision fallback
+    // 2. Smart Hybrid Speed + Accuracy Routing:
+    // - Flash mode: ALWAYS Instant Crisp Live Vision (~1.3s, 0 REST quota) for every subject.
+    // - Auto (Default — Smart Hybrid):
+    //     * General quizzes / IT / English / Theory / Screen reading -> Instant Crisp Live Vision (~1.3s, 0 REST quota!)
+    //     * Math / Physics / Chemistry / Check-work (sign-sensitive!) -> Verified gemini-2.5-flash thinking (~2.5-4s, hard 12s cap!)
+    //       with instant 0ms skip to Direct Crisp Live Vision if 20/day quota was already reached!
+    // - Pro mode: Dedicated Deep REST Verification (Pro -> Flash, hard 15s cap) with seamless Live Vision fallback.
     let mode_cfg = cfg.study_brain_mode();
-    if mode_cfg == StudyBrainMode::Flash
+    let wants_stem_verify = needs_verified_stem_solver(&subject, &mode, &question);
+    let use_instant_live_vision = match mode_cfg {
+        StudyBrainMode::Flash => true,
+        StudyBrainMode::Auto => !wants_stem_verify || is_model_perma_disabled(FLASH_MODEL),
+        StudyBrainMode::Pro => false,
+    };
+
+    if use_instant_live_vision
         && let Some(ref img) = captured
         && let Ok(jpeg) = captured_to_jpeg(img)
     {
-        progress_guard.update("⚡ Đã gửi ảnh sắc nét trực tiếp cho Boogie Live!", 0.96);
+        progress_guard.update(
+            "📸 Đã chụp xong! Có thể Alt+Tab — đang trả lời ngay...",
+            0.96,
+        );
         let _ = event_tx.send(AppEvent::Log(format!(
-            "Study [live-vision-fast]: Captured {} ({} KB) -> Direct Live Vision",
+            "Study [instant-live-vision]: Captured {} ({} KB) -> Instant Live Vision",
             img.source_desc,
             jpeg.len() / 1024
         )));
         return ToolResult::ok_with_image(
             format!(
-                "[DIRECT CRISP LIVE VISION ({}) — answer immediately! Carefully read every digit, sign (+/-), exponent, subscript, and option A/B/C/D in the attached high-res screenshot, double-check your calculation silently, then give the exact final answer and 2-3 tight steps in {language} matching level={level}, mode={mode}. Request: {question}]",
+                "[INSTANT CRISP LIVE VISION ({}) — answer IMMEDIATELY in 1-3 crisp sentences! Carefully read every question, digit, sign (+/-), exponent, and option A/B/C/D in this high-res 1920px screenshot, double-check your answer silently, state the exact final answer FIRST, then give only the tightest key reason in {language} (level={level}, mode={mode}). Request: {question}]",
                 img.source_desc
             ),
             jpeg,
@@ -872,9 +937,10 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
         StudyBrainMode::Auto => Some(512),
         StudyBrainMode::Pro => Some(2048),
     };
+    let use_fast_timeout = mode_cfg != StudyBrainMode::Pro;
     progress_guard.update(
         if captured.is_some() {
-            "📸 Đã chụp xong! Có thể Alt+Tab — đang đọc dấu & giải..."
+            "📸 Đã chụp xong! Có thể Alt+Tab — đang kiểm chứng dấu & giải..."
         } else {
             "Bước 2/3 · Đang giải & kiểm chứng đáp án..."
         },
@@ -888,7 +954,7 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
         false,
         4096,
         think_budget,
-        false,
+        use_fast_timeout,
     )
     .await
     {
@@ -962,12 +1028,38 @@ mod tests {
     #[test]
     fn model_chain_respects_study_brain_mode() {
         let flash_chain = select_model_chain(StudyBrainMode::Flash);
-        assert_eq!(flash_chain.first().copied(), Some(FLASH_MODEL));
-        assert!(flash_chain.contains(&"gemini-3.1-flash-lite"));
+        assert_eq!(flash_chain, vec![FLASH_MODEL]);
 
         let pro_chain = select_model_chain(StudyBrainMode::Pro);
         assert_eq!(pro_chain.first().copied(), Some(PRO_MODEL));
         assert!(pro_chain.contains(&FLASH_MODEL));
+    }
+
+    #[test]
+    fn smart_hybrid_routing_distinguishes_quizzes_from_stem_math() {
+        // IT / networking / English / general quizzes go straight to ~1.3s Instant Live Vision
+        assert!(!needs_verified_stem_solver(
+            "informatics",
+            "solve",
+            "Giải câu trắc nghiệm Quản trị hệ thống mạng Windows trên màn hình"
+        ));
+        assert!(!needs_verified_stem_solver(
+            "english",
+            "solve",
+            "Choose the best answer A, B, C, or D"
+        ));
+        // Math / Physics / Chemistry / check-work go to verified thinking solver
+        assert!(needs_verified_stem_solver("math", "solve", "Giải câu 3"));
+        assert!(needs_verified_stem_solver(
+            "general",
+            "solve",
+            "Tính tích phân và đạo hàm câu 2 trên màn hình"
+        ));
+        assert!(needs_verified_stem_solver(
+            "english",
+            "check",
+            "Kiểm tra bài làm của mình"
+        ));
     }
 
     #[test]

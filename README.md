@@ -8,7 +8,7 @@
 Powered by Gemini Live API, a 60 FPS 3D Liquid Glass GLSL orb, interactive Study Visual board, and Document Studio.
 
 <p>
-  <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest"><strong>Download v0.4.0</strong></a>
+  <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest"><strong>Download v0.4.1</strong></a>
   &nbsp;·&nbsp;
   <a href="https://thodark.github.io/Boogie-AI-Assistant/">Website &amp; Guide (VI / EN)</a>
   &nbsp;·&nbsp;
@@ -44,7 +44,7 @@ Boogie is a single-binary Windows voice assistant written from scratch in **pure
 | :--- | :--- |
 | **Real-Time Voice & 3D Orb** | `~580 ms` first-audio latency, `< 20 ms` barge-in interrupt, Push-to-Talk (`Space`), 3 GPU quality tiers (`Low` / `Medium` / `High`), and 8 live-preview color themes. |
 | **Study Visual & Art Study** | Toggleable split-screen teaching board (`study_board`): `< 50 ms` instant zero-quota direct rendering, Sticky Teaching Mode, step-by-step reveal, 2D Math/Physics graphs, flowcharts/mindmaps, highlighted code, **Art Study** (Rule of Thirds, B&W Value Study, pixel HEX palette, animated Live Sketch Replay), and 1-click PDF/Word export. |
-| **Study Brain (Grade 1 → Uni)** | High-res screen (`1920px Q95 JPEG`) or `Win+Shift+S` clipboard snip solver (`study_solve`) with an instant `~25 ms` post-capture shutter beep so you can `Alt+Tab` right away, verified REST cascade (`gemini-2.5-flash` → `gemini-3.1-flash-lite`), and automatic zero-quota Direct Live Vision fallback. |
+| **Study Brain (Grade 1 → Uni)** | **Smart Hybrid routing** (`study_solve`): instant `~1.3 s` Direct Crisp Live Vision (`1920px Q90`, 0 REST quota) for quizzes, IT, English & theory, and verified sign-checking `gemini-2.5-flash` thinking (`~2.5–4 s`, hard `12 s` cap + 0 ms fallback) for Math, Physics, Chemistry & work-checking — with a `~25 ms` shutter beep so you can `Alt+Tab` right away. |
 | **Document Studio** | Generates UTF-8 study guides, practice exams with separate answer keys, structured notes, and formula-driven Excel sheets (`=SUM`, `=AVERAGE`) in **PDF**, **Word (`.docx`)**, and **Excel (`.xlsx`)** — no Microsoft Office needed (`.pptx` intentionally excluded). |
 | **46 Native Windows Tools** | App launcher (Win32 / Start Menu / Registry), real browser automation, screen vision, system controls, reminders, timers, YouTube media, Steam library, PDF/Excel reader, clipboard, and reversible `undo`. |
 | **Persistent Smart Memory** | Stores settings, API key, and long-term memory in `%APPDATA%\Boogie\` so upgrading to a newer versioned `.exe` never loses data. Supports Vietnamese diacritic-tolerant search and an in-app Memory Manager. |
@@ -57,8 +57,8 @@ No Rust, Python, or installer required. Grab the latest Windows 10 / 11 (64-bit)
 
 | Artifact | Size | Contents | Link |
 | :--- | :---: | :--- | :--- |
-| **`Boogie-v0.4.0-Windows-x64.zip`** | `11.9 MB` | **Recommended** — `Boogie-v0.4.0.exe`, config template, `README.md`, `LICENSE` | [Download ZIP](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.0-Windows-x64.zip) |
-| **`Boogie-v0.4.0.exe`** | `32.2 MB` | Standalone portable executable with embedded Windows version info | [Download EXE](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.0.exe) |
+| **`Boogie-v0.4.1-Windows-x64.zip`** | `11.9 MB` | **Recommended** — `Boogie-v0.4.1.exe`, config template, `README.md`, `LICENSE` | [Download ZIP](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.1-Windows-x64.zip) |
+| **`Boogie-v0.4.1.exe`** | `32.2 MB` | Standalone portable executable with embedded Windows version info | [Download EXE](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.1.exe) |
 | **`SHA256SUMS.txt`** | `182 B` | Official SHA-256 release checksums | [View Checksums](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/SHA256SUMS.txt) |
 
 ---
@@ -66,7 +66,7 @@ No Rust, Python, or installer required. Grab the latest Windows 10 / 11 (64-bit)
 ## Quick Start
 
 1. **Get a free Gemini API key** at [Google AI Studio](https://aistudio.google.com/apikey) (`AIza...`).
-2. **Launch `Boogie-v0.4.0.exe`** (extract the ZIP anywhere, or run the standalone `.exe`).
+2. **Launch `Boogie-v0.4.1.exe`** (extract the ZIP anywhere, or run the standalone `.exe`).
 3. **Complete Setup** — paste your key, pick a graphics tier (`Low` for integrated GPUs, `High` for dedicated GPUs), choose a theme & voice, and click **Save & Connect**.
 
 Your API key and memories are stored locally in `%APPDATA%\Boogie\` and only connect directly to Google's Gemini endpoints. Open the top-right **Settings** gear anytime to hot-reload settings without restarting.
@@ -77,7 +77,7 @@ Your API key and memories are stored locally in `%APPDATA%\Boogie\` and only con
 - **Windows SmartScreen:** Because open-source releases are not signed with a paid EV certificate, Windows may show *"Windows protected your PC"*. Verify the SHA-256 hash below, then click **More info → Run anyway**.
 - **Verify Checksum (PowerShell):**
   ```powershell
-  Get-FileHash .\Boogie-v0.4.0-Windows-x64.zip -Algorithm SHA256
+  Get-FileHash .\Boogie-v0.4.1-Windows-x64.zip -Algorithm SHA256
   ```
 - **Upgrade Persistence & USB Portable Mode:** By default, Boogie stores `api_keys.json`, `memory.json`, `long_term.json`, and `boogie.log` in `%APPDATA%\Boogie\` (automatically migrating legacy `v0.1–v0.3` files from `<exe_dir>\config\` on first launch). Create an empty `portable.txt` next to the `.exe` if you prefer local `<exe_dir>\config\` storage.
 - **Diagnostics:** Set `RUST_LOG=boogie=debug` for verbose trace logging (defaults to `boogie=info`).
@@ -158,6 +158,11 @@ flowchart LR
 ---
 
 ## Changelog
+
+### [`v0.4.1`](https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.4.1) — 2026-11-26
+- **Smart Hybrid On-Screen Study Routing (`study_solve`):** Default `Auto` mode now routes quizzes, IT/networking, English, humanities, and general screen questions directly to crisp **`1920px Q90` Direct Live Vision (`~1.3 s`, 0 REST quota)**, while reserving verified **`gemini-2.5-flash` thinking (`~2.5–4 s`, hard `12 s` cap)** for Math, Physics, Chemistry, and check-work sign verification (with instant `0 ms` fallback to Live Vision if daily REST quota is reached).
+- **Eliminated 24s–65s REST Hangs:** Removed congested `gemini-3.1-flash-lite` from interactive study/board fallbacks, tightened REST timeouts (`12 s` / `15 s`), and prioritized instant `< 50 ms` Direct `board_json` rendering on Study Visual.
+- **Automated Versioned Release Workflow:** Updated `.github/workflows/release.yml` so GitHub Actions automatically packages `Boogie-v<ver>.exe`, `Boogie-v<ver>-Windows-x64.zip`, and `SHA256SUMS.txt`.
 
 ### [`v0.4.0`](https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.4.0) — 2026-11-26
 - **Upgrade-Safe Persistent Storage (`%APPDATA%\Boogie\`) & Versioned `.exe` (`Boogie-v0.4.0.exe`):** Config, API key, and memory persist across folder deletions and upgrades with automatic one-time migration from legacy `config/` folders.

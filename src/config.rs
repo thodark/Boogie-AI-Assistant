@@ -240,9 +240,9 @@ impl StudyBrainMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Auto => "Auto (Verified Fast Thinking — Recommended)",
-            Self::Flash => "Flash Direct Vision (~1.2s — Zero REST Quota)",
-            Self::Pro => "Pro 3.1 Deep Thinking (Paid API Key)",
+            Self::Auto => "Auto (Smart: ~1.3s Quizzes / Verified Math)",
+            Self::Flash => "Flash Instant (~1.3s Live Vision — All Subjects)",
+            Self::Pro => "Pro Deep Verification (Paid Key — Slower)",
         }
     }
 

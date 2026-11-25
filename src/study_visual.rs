@@ -575,15 +575,15 @@ pub fn register(registry: &mut ToolRegistry, event_tx: broadcast::Sender<AppEven
                     param(
                         "board_json",
                         "string",
-                        "FAST DIRECT MODE (<50ms, ZERO extra REST quota!): For text lessons (source='text', art_mode=false), \
-                         pass a compact valid JSON string directly with: \
+                        "ALWAYS PROVIDE THIS for source='text' lessons (renders INSTANTLY in <50ms with ZERO wait and ZERO REST quota!): \
+                         Compact valid JSON string: \
                          {\"title\":\"...\",\"subject\":\"...\",\"level\":\"...\",\"summary\":\"...\",\
                          \"steps\":[{\"heading\":\"...\",\"body\":\"...\",\"formula\":\"\",\"highlight\":\"\"}],\
                          \"blocks\":[{\"type\":\"graph2d|formula_box|table|diagram|code\", ...}]}. \
                          Graph2d curve example: {\"type\":\"graph2d\",\"title\":\"...\",\"x_min\":-5,\"x_max\":5,\"y_min\":-5,\"y_max\":5,\
                          \"curves\":[{\"label\":\"y=x²-2x-3\",\"expr\":\"x^2-2*x-3\",\"color\":\"#38BDF8\"}],\
                          \"points\":[{\"x\":1,\"y\":-4,\"label\":\"I(1,-4)\"}]}. \
-                         Omit board_json when art_mode=true or source='screen'/'clipboard'.",
+                         Omit board_json ONLY when art_mode=true or source='screen'/'clipboard'.",
                     ),
                 ),
             ],
