@@ -1,6 +1,6 @@
 [package]
 name = "boogie"
-version = "0.4.5"
+version = "0.5.0"
 edition = "2024"
 description = "Boogie — ultra-fast native Rust real-time voice AI assistant for Windows powered by Gemini Live API"
 license = "MIT"

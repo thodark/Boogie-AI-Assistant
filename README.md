@@ -8,7 +8,7 @@
 Powered by Gemini Live API, a 60 FPS 3D Liquid Glass GLSL orb, interactive Study Visual board, and Document Studio.
 
 <p>
-  <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest"><strong>Download v0.4.5</strong></a>
+  <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest"><strong>Download v0.5.0</strong></a>
   &nbsp;·&nbsp;
   <a href="https://thodark.github.io/Boogie-AI-Assistant/">Website &amp; Guide (VI / EN)</a>
   &nbsp;·&nbsp;
@@ -57,8 +57,8 @@ No Rust, Python, or installer required. Grab the latest Windows 10 / 11 (64-bit)
 
 | Artifact | Size | Contents | Link |
 | :--- | :---: | :--- | :--- |
-| **`Boogie-v0.4.5-Windows-x64.zip`** | `11.9 MB` | **Recommended** — `Boogie-v0.4.5.exe`, config template, `README.md`, `LICENSE` | [Download ZIP](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.5-Windows-x64.zip) |
-| **`Boogie-v0.4.5.exe`** | `32.2 MB` | Standalone portable executable with embedded Windows version info | [Download EXE](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.5.exe) |
+| **`Boogie-v0.5.0-Windows-x64.zip`** | `11.9 MB` | **Recommended** — `Boogie-v0.5.0.exe`, config template, `README.md`, `LICENSE` | [Download ZIP](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.5.0-Windows-x64.zip) |
+| **`Boogie-v0.5.0.exe`** | `32.2 MB` | Standalone portable executable with embedded Windows version info | [Download EXE](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.5.0.exe) |
 | **`SHA256SUMS.txt`** | `182 B` | Official SHA-256 release checksums | [View Checksums](https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/SHA256SUMS.txt) |
 
 ---
@@ -66,7 +66,7 @@ No Rust, Python, or installer required. Grab the latest Windows 10 / 11 (64-bit)
 ## Quick Start
 
 1. **Get a free Gemini API key** at [Google AI Studio](https://aistudio.google.com/apikey) (`AIza...`).
-2. **Launch `Boogie-v0.4.5.exe`** (extract the ZIP anywhere, or run the standalone `.exe`).
+2. **Launch `Boogie-v0.5.0.exe`** (extract the ZIP anywhere, or run the standalone `.exe`).
 3. **Complete Setup** — paste your key, pick a graphics tier (`Low` for integrated GPUs, `High` for dedicated GPUs), choose a theme & voice, and click **Save & Connect**.
 
 Your API key and memories are stored locally in `%APPDATA%\Boogie\` and only connect directly to Google's Gemini endpoints. Open the top-right **Settings** gear anytime to hot-reload settings without restarting.
@@ -77,7 +77,7 @@ Your API key and memories are stored locally in `%APPDATA%\Boogie\` and only con
 - **Windows SmartScreen:** Because open-source releases are not signed with a paid EV certificate, Windows may show *"Windows protected your PC"*. Verify the SHA-256 hash below, then click **More info → Run anyway**.
 - **Verify Checksum (PowerShell):**
   ```powershell
-  Get-FileHash .\Boogie-v0.4.5-Windows-x64.zip -Algorithm SHA256
+  Get-FileHash .\Boogie-v0.5.0-Windows-x64.zip -Algorithm SHA256
   ```
 - **Upgrade Persistence & USB Portable Mode:** By default, Boogie stores `api_keys.json`, `memory.json`, `long_term.json`, and `boogie.log` in `%APPDATA%\Boogie\` (automatically migrating legacy `v0.1–v0.3` files from `<exe_dir>\config\` on first launch). Create an empty `portable.txt` next to the `.exe` if you prefer local `<exe_dir>\config\` storage.
 - **Diagnostics:** Set `RUST_LOG=boogie=debug` for verbose trace logging (defaults to `boogie=info`).
@@ -158,6 +158,12 @@ flowchart LR
 ---
 
 ## Changelog
+
+### [`v0.5.0`](https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.5.0) — 2026-11-26
+- **Universal Research → Confirm → Generate Exam Workflow (`prompt.txt`, `documents.rs`):** For ANY subject, university course, or certification, Boogie now researches the real official exam format via `web_search` first, summarizes the sections found (or asks openly when lecturer/school-specific), invites you to add/customize sections & confirm PDF/Word/Excel, and passes the confirmed blueprint via the new `exam_structure` parameter.
+- **Dedicated Multi-Model Document Author Engine (`study.rs`, `documents.rs`):** Added a 4-bucket free-tier REST cascade (`gemini-2.5-flash` → `gemini-flash-lite-latest` → `gemini-3.5-flash-lite` → `gemma-4-26b-a4b-it`) with a dedicated 55 s timeout and 24K output token budget so Document Studio generates real full-length exams even after `gemini-2.5-flash`'s 20/day limit is reached.
+- **Automated Exam Quality Gate & Auto-Repair:** Validates every draft before opening Save As — automatically catching question-count shortfalls, `..` placeholders, missing Reading passages, missing Listening audio scripts, empty Writing/Speaking prompts, and thin Answer Keys, then running an automatic repair regeneration pass so stub exams never slip through.
+- **All-Subject Blueprints & Publication-Grade PDF/Word Layout:** Added subject-specific authoring blueprints (English VSTEP/IELTS/TOEIC with real 220–350 word Reading passages & Listening Transcripts, Math, Physics/Chemistry/Biology, Informatics/CS/SQL code blocks, Literature excerpts & rubrics, History/Geography/Economics tables) plus a clean exam header (candidate strip, duration, score, instructions), `@page` running page numbers, editorial passage & code boxes, ruled essay writing lines, dedicated Listening Transcripts page, and a Quick Answer Grid.
 
 ### [`v0.4.5`](https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.4.5) — 2026-11-26
 - **Bulletproof Headless PDF Export (`documents.rs`):** Fixed a race condition where Microsoft Edge's first-launch relaunch process exited early before flushing the PDF — `render_pdf` now prints to an ASCII temp file first, waits up to 6 s for `%PDF-` stabilization before cleaning up temp HTML, enforces a 16 s per-browser timeout, automatically cascades across **Chrome → Edge → Brave**, and clearly reports file-lock errors (e.g. PDF already open in Foxit/Edge).

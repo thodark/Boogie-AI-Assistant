@@ -21,11 +21,11 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Liên hệ",
       "nav.cta": "Tải ngay",
-      "hero.badge": "Mới v0.4.5: Xuất PDF chống lỗi Edge (Chrome → Edge), tự nhắc đọc tiếng mọi lượt Vision & chống rớt GoAway",
+      "hero.badge": "Mới v0.5.0: Document Studio 2.0 — Soạn đề thi đủ 100% mọi môn (Reading/Transcript/Code/Tự luận) & tự kiểm duyệt",
       "hero.title": 'Trợ lý AI giọng nói <span class="gradient-text">kiểu JARVIS</span> ngay trên Windows của bạn.',
       "hero.subtitle": "Tải về là chạy ngay — không cần cài đặt phức tạp, không cần biết code. Nói chuyện tự nhiên tiếng Việt / Anh với phản hồi ~0.58 giây, bảng dạy học tương tác Study Visual (đồ thị, sơ đồ, Art Study), xuất đề cương PDF/Word/Excel có hộp thoại chọn chỗ lưu, điều khiển 46 tác vụ Windows và trí nhớ thông minh.",
       "hero.downloadZip": "Tải cho Windows (ZIP — Khuyên dùng)",
-      "hero.downloadExe": "Bản Portable 1 file (Boogie-v0.4.5.exe)",
+      "hero.downloadExe": "Bản Portable 1 file (Boogie-v0.5.0.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
       "hero.trust2": "Không cần Rust, Cargo hay Python",
       "hero.trust3": "Chạy Portable không cần cài",
@@ -43,7 +43,7 @@
       "download.zipDesc": "Gói Portable đầy đủ gồm file <code>.exe</code> kèm số phiên bản, mẫu cấu hình, hướng dẫn và giấy phép MIT. Xóa thư mục bản cũ tải bản mới vẫn giữ nguyên 100% API key và trí nhớ!",
       "download.exeDesc": "Bản chạy thẳng 1 tệp duy nhất có kèm số phiên bản trên tên file (vd: <code>Boogie-v0.4.0.exe</code>). API key, cấu hình và bộ nhớ lưu bền vững trong <code>%APPDATA%\\Boogie\\</code> nên đổi bản mới không lo mất dữ liệu.",
       "download.zipBtn": "Tải gói ZIP",
-      "download.exeBtn": "Tải Boogie-v0.4.5.exe",
+      "download.exeBtn": "Tải Boogie-v0.5.0.exe",
       "sha.title": "Kiểm tra mã toàn vẹn SHA-256",
       "sha.desc": "Đối chiếu mã SHA-256 sau khi tải để chắc chắn 100% file nguyên bản từ GitHub Releases và không bị chỉnh sửa.",
       "sha.fileCol": 'Tệp phát hành (<span id="sha-release-tag">latest</span>)',
@@ -121,11 +121,11 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Contact",
       "nav.cta": "Download",
-      "hero.badge": "New in v0.4.5: Bulletproof PDF Export (Chrome → Edge), Zero-Audio Vision Guard & Clean GoAway Refresh",
+      "hero.badge": "New in v0.5.0: Document Studio 2.0 — Complete All-Subject Exams (Passages/Transcripts/Code) & Auto Quality Gate",
       "hero.title": 'A <span class="gradient-text">JARVIS-style</span> real-time voice AI assistant for Windows.',
       "hero.subtitle": "Download and run instantly — no installer, no Rust or Python, no coding required. Talk naturally in English or Vietnamese (~0.58s TTFB), open an interactive split-screen Study Visual & Art Study board, export PDF/Word/Excel study guides with a mandatory Windows Save As picker, and automate 46 Windows tools.",
       "hero.downloadZip": "Download for Windows (ZIP — Recommended)",
-      "hero.downloadExe": "Portable Single File (Boogie-v0.4.5.exe)",
+      "hero.downloadExe": "Portable Single File (Boogie-v0.5.0.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
       "hero.trust2": "No Rust, Cargo, or Python needed",
       "hero.trust3": "Portable — zero installation",
@@ -143,7 +143,7 @@
       "download.zipDesc": "Complete bundle with the versioned <code>.exe</code>, example config, README, and MIT License. Delete old folders anytime when upgrading — your API key and memories stay safe!",
       "download.exeDesc": "Standalone single executable clearly labeled with its version (e.g. <code>Boogie-v0.4.0.exe</code>). API key, settings, and memories are stored persistently in <code>%APPDATA%\\Boogie\\</code> across upgrades.",
       "download.zipBtn": "Download ZIP Bundle",
-      "download.exeBtn": "Download Boogie-v0.4.5.exe",
+      "download.exeBtn": "Download Boogie-v0.5.0.exe",
       "sha.title": "Verify Release Integrity (SHA-256)",
       "sha.desc": "Compare your downloaded file's SHA-256 hash to guarantee it came untouched from official GitHub Releases.",
       "sha.fileCol": 'Release file (<span id="sha-release-tag">latest</span>)',
@@ -528,6 +528,20 @@
   ];
 
   const CHANGELOG = {
+    v050: {
+      vi: [
+        "<strong>Quy trình Nghiên cứu cấu trúc → Hỏi bổ sung → Soạn đề chuẩn cho MỌI môn học:</strong> Khi bạn yêu cầu làm đề bất kỳ môn nào (đại học, phổ thông, chứng chỉ...), Boogie chủ động tra cứu cấu trúc đề thật của môn đó trước, tóm tắt các phần tìm được và hỏi bạn có muốn thêm/bớt phần hay dạng bài nào không (hoặc hỏi rõ nếu là môn đặc thù từng trường) rồi mới truyền <code>exam_structure</code> đã chốt vào động cơ soạn đề.",
+        "<strong>Document Studio 2.0 — Động cơ soạn đề đa model Free Tier:</strong> Bổ sung chuỗi 4 model độc lập (<code>gemini-2.5-flash</code> → <code>gemini-flash-lite-latest</code> → <code>gemini-3.5-flash-lite</code> → <code>gemma-4-26b-a4b-it</code>) với timeout 55 giây &amp; bộ nhớ 24K token, soạn đủ trọn bộ đề dài 15–40 câu ngay cả khi <code>gemini-2.5-flash</code> đã hết 20 lượt/ngày.",
+        "<strong>Bộ kiểm duyệt chất lượng &amp; tự sửa đề (Quality Gate + Auto-Repair):</strong> Tự động chặn và viết lại nếu đề thiếu số câu yêu cầu, chứa đoạn cắt cụt <code>..</code>, thiếu bài đọc Reading 220–350 từ, thiếu kịch bản bài nghe Listening, bỏ trống đề Writing/Speaking hoặc thiếu đáp án.",
+        "<strong>Chuẩn đề thi mọi môn &amp; giao diện PDF/Word mới cực đẹp:</strong> Tích hợp cấu trúc chuyên biệt cho Ngoại ngữ (VSTEP/IELTS/TOEIC có trang <em>Listening Transcripts</em> riêng), Toán, Lý/Hóa/Sinh, Tin học/SQL (khung code monospace), Ngữ văn (ngữ liệu + dàn ý), Sử/Địa/Kinh tế — kèm khung Họ tên/Lớp/Điểm, đánh số trang tự động, dòng kẻ viết tự luận và Bảng tra nhanh đáp án.",
+      ],
+      en: [
+        "<strong>Universal Research → Confirm Additions → Generate Workflow (Any Subject):</strong> Before generating any exam or study guide, Boogie researches that subject's real official format via <code>web_search</code>, summarizes the proposed sections (or asks openly for lecturer-specific courses), lets you add or tweak sections &amp; confirm PDF/Word/Excel, and passes the confirmed <code>exam_structure</code> blueprint straight to the author engine.",
+        "<strong>Document Studio 2.0 — 4-Model Free-Tier Author Engine:</strong> Dedicated long-form cascade (<code>gemini-2.5-flash</code> → <code>gemini-flash-lite-latest</code> → <code>gemini-3.5-flash-lite</code> → <code>gemma-4-26b-a4b-it</code>) with 55s timeout and 24K output budget so full 15–40 question exams render cleanly even after <code>gemini-2.5-flash</code> hits its 20/day free cap.",
+        "<strong>Automated Quality Gate &amp; Auto-Repair:</strong> Inspects every draft before Save As — catching question shortfalls, <code>..</code> placeholders, missing Reading passages, missing Listening scripts, bare Writing/Speaking stubs, and incomplete Answer Keys, then automatically regenerating missing parts.",
+        "<strong>All-Subject Blueprints &amp; Upgraded PDF/Word Design:</strong> Domain blueprints for English (VSTEP/IELTS/TOEIC with dedicated <em>Listening Transcripts</em>), Math, Physics/Chemistry/Biology, CS/SQL code blocks, Literature excerpts &amp; rubrics, and Humanities/Economics tables — plus candidate info strip, running page numbers, ruled essay lines, and a Quick Answer Grid.",
+      ],
+    },
     v045: {
       vi: [
         "<strong>Sửa triệt để lỗi xuất PDF thất bại do Microsoft Edge tự tách tiến trình:</strong> Chuyển cơ chế in PDF sang xuất tệp tạm ASCII, chờ ổn định header <code>%PDF-</code> trước khi dọn HTML, thêm timeout cứng 16 giây, tự động dự phòng theo chuỗi <strong>Chrome → Edge → Brave</strong> và báo rõ nếu file PDF đang bị mở khóa bởi Foxit/Edge.",
@@ -828,6 +842,7 @@
   }
 
   function renderChangelog() {
+    const v050 = document.getElementById("cl-v050");
     const v045 = document.getElementById("cl-v045");
     const v044 = document.getElementById("cl-v044");
     const v043 = document.getElementById("cl-v043");
@@ -837,6 +852,7 @@
     const v030 = document.getElementById("cl-v030");
     const v020 = document.getElementById("cl-v020");
     const v010 = document.getElementById("cl-v010");
+    if (v050) v050.innerHTML = CHANGELOG.v050[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v045) v045.innerHTML = CHANGELOG.v045[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v044) v044.innerHTML = CHANGELOG.v044[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v043) v043.innerHTML = CHANGELOG.v043[currentLang].map((li) => `<li>${li}</li>`).join("");
@@ -902,7 +918,7 @@
     syncReleaseTagText();
   }
 
-  let latestTagText = "v0.4.5";
+  let latestTagText = "v0.5.0";
   function syncReleaseTagText() {
     const shaTag = document.getElementById("sha-release-tag");
     if (shaTag) shaTag.textContent = latestTagText;
@@ -919,7 +935,7 @@
       });
       if (!res.ok) throw new Error("release fetch failed");
       const rel = await res.json();
-      const tag = rel.tag_name || "v0.4.5";
+      const tag = rel.tag_name || "v0.5.0";
       latestTagText = tag;
 
       ["nav-version", "hero-release-tag", "card-zip-version", "card-exe-version", "sha-release-tag"].forEach((id) => {

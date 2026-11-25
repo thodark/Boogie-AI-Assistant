@@ -404,7 +404,7 @@ impl StudyBoardData {
                         } else {
                             title.clone()
                         },
-                        callout: Some(lines.join("\n")),
+                        code_block: Some(lines.join("\n")),
                         ..Default::default()
                     });
                 }
@@ -465,9 +465,9 @@ impl StudyBoardData {
             subtitle: format!("Exported from Boogie Study Visual ({})", self.model_used),
             subject: self.subject.clone(),
             level: self.level.clone(),
+            doc_type: "notes".to_string(),
             sections,
-            answer_key: Vec::new(),
-            sheets: Vec::new(),
+            ..Default::default()
         }
     }
 }

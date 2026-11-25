@@ -18,6 +18,15 @@ const FLASH_MODEL: &str = "gemini-2.5-flash";
 // Only use genuinely fast REST models (removed congested preview/lite endpoints that hung 24s-65s).
 // If FLASH_MODEL hits daily 429 or >14s timeout, callers drop in 0ms into Direct Live Vision / Direct Board!
 const FAST_FALLBACK_MODELS: &[&str] = &[FLASH_MODEL];
+// Dedicated high-output multi-bucket cascade for Document Studio (PDF/Word/Excel authoring).
+// Each model sits in an independent free-tier quota bucket so exhausting gemini-2.5-flash (20/day)
+// seamlessly rotates to fast 32K-65K output models instead of falling back to a stubby Live tool arg!
+const DOC_AUTHOR_MODELS: &[&str] = &[
+    FLASH_MODEL,
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemma-4-26b-a4b-it",
+];
 const PRO_RATE_LIMIT_BACKOFF_SECS: u64 = 120;
 const STUDY_MAX_SCREEN_DIM: u32 = 1920;
 const STUDY_MAX_CLIPBOARD_DIM: u32 = 2200;
@@ -26,9 +35,20 @@ pub(crate) const REST_QUOTA_EXHAUSTED_TAG: &str = "REST_QUOTA_EXHAUSTED";
 
 static STUDY_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static FAST_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static DOC_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static PRO_COOLDOWN_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 static PERMA_UNAVAILABLE_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn doc_http_client() -> &'static reqwest::Client {
+    DOC_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(55))
+            .connect_timeout(Duration::from_secs(8))
+            .build()
+            .unwrap_or_default()
+    })
+}
 
 fn study_http_client(fast_lane: bool) -> &'static reqwest::Client {
     if fast_lane {
@@ -897,6 +917,206 @@ pub(crate) async fn call_study_brain(
     }
     Err(format!(
         "Study Brain could not complete the request ({last_err}). Try again or switch Study Brain to Flash Direct Vision in Settings."
+    ))
+}
+
+async fn call_gemini_document(
+    api_key: &str,
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    image: Option<&CapturedImage>,
+    max_output_tokens: u32,
+) -> Result<String, (u16, String)> {
+    let url =
+        format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
+    let is_gemma = model.starts_with("gemma-");
+
+    let mut parts = Vec::new();
+    if let Some(img) = image {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
+        parts.push(json!({
+            "inlineData": {
+                "mimeType": img.mime_type,
+                "data": b64
+            }
+        }));
+    }
+
+    let (body_templates, effective_parts) = if is_gemma {
+        let combined = format!("{system_prompt}\n\n---\n\n{user_prompt}");
+        parts.push(json!({ "text": combined }));
+        let configs = vec![json!({
+            "temperature": 0.25,
+            "maxOutputTokens": max_output_tokens.min(32_000)
+        })];
+        (configs, parts)
+    } else {
+        parts.push(json!({ "text": user_prompt }));
+        let mut configs = Vec::new();
+        if model_supports_thinking(model) {
+            configs.push(json!({
+                "temperature": 0.25,
+                "maxOutputTokens": max_output_tokens,
+                "responseMimeType": "application/json",
+                "thinkingConfig": { "thinkingBudget": 0 }
+            }));
+        }
+        configs.push(json!({
+            "temperature": 0.25,
+            "maxOutputTokens": max_output_tokens,
+            "responseMimeType": "application/json"
+        }));
+        configs.push(json!({
+            "temperature": 0.25,
+            "maxOutputTokens": max_output_tokens
+        }));
+        (configs, parts)
+    };
+
+    let mut last_err = (0u16, "no attempt".to_string());
+
+    for (attempt, gen_cfg) in body_templates.iter().enumerate() {
+        let mut body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": effective_parts
+            }],
+            "generationConfig": gen_cfg
+        });
+        if !is_gemma {
+            body["systemInstruction"] = json!({
+                "parts": [{ "text": system_prompt }]
+            });
+        }
+
+        let started = Instant::now();
+        let resp = match doc_http_client()
+            .post(&url)
+            .header("x-goog-api-key", api_key)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let kind = if e.is_timeout() {
+                    "request timed out"
+                } else if e.is_connect() {
+                    "connection failed"
+                } else {
+                    "network error"
+                };
+                return Err((0, format!("{kind} calling {model}")));
+            }
+        };
+
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+
+        if status == 200 {
+            tracing::info!(
+                "document author {model} responded in {}ms ({} chars)",
+                started.elapsed().as_millis(),
+                text.len()
+            );
+            let parsed: Value = serde_json::from_str(&text)
+                .map_err(|e| (200, format!("json decode failed: {e}")))?;
+            if let Some(answer) = extract_answer_text(&parsed) {
+                return Ok(answer);
+            }
+            return Err((200, "model returned empty response".to_string()));
+        }
+
+        let err_detail = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v.pointer("/error/message")
+                    .and_then(|m| m.as_str())
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| truncate_chars(&text, 200).to_string());
+
+        last_err = (status, err_detail.clone());
+
+        if status == 400 && attempt + 1 < body_templates.len() {
+            tracing::warn!(
+                "document author ({model}) 400 on attempt {}: {err_detail} — retrying simpler config",
+                attempt + 1
+            );
+            continue;
+        }
+        return Err(last_err);
+    }
+
+    Err(last_err)
+}
+
+/// Dedicated long-form Document Author Engine with a 55s timeout and 4 independent free-tier
+/// model buckets (`gemini-2.5-flash` -> `gemini-flash-lite-latest` -> `gemini-3.5-flash-lite`
+/// -> `gemma-4-26b-a4b-it`) so full 20-40 question exams never get truncated or degraded to stubs.
+pub(crate) async fn call_document_author(
+    cfg: &ApiConfig,
+    system_prompt: &str,
+    user_prompt: &str,
+    image: Option<&CapturedImage>,
+    max_output_tokens: u32,
+) -> Result<(String, &'static str), String> {
+    let api_key = cfg.api_key();
+    if api_key.is_empty() {
+        return Err("Gemini API key is missing.".to_string());
+    }
+
+    let models: Vec<&'static str> = DOC_AUTHOR_MODELS
+        .iter()
+        .copied()
+        .filter(|m| !is_model_perma_disabled(m))
+        .collect();
+    if models.is_empty() {
+        return Err(format!(
+            "{REST_QUOTA_EXHAUSTED_TAG}: All document author models reached their daily quota."
+        ));
+    }
+
+    let mut last_err = String::new();
+    let mut hit_quota = false;
+
+    for model in models {
+        tracing::info!(
+            "document author invoking {model} (max_tokens={max_output_tokens}, has_image={})",
+            image.is_some()
+        );
+        match call_gemini_document(
+            api_key,
+            model,
+            system_prompt,
+            user_prompt,
+            image,
+            max_output_tokens,
+        )
+        .await
+        {
+            Ok(ans) => return Ok((ans, model)),
+            Err((status, msg)) => {
+                tracing::warn!("document author {model} failed (HTTP {status}): {msg}");
+                if status == 429 {
+                    hit_quota = true;
+                }
+                if is_quota_exhausted_for_session(status, &msg) {
+                    mark_model_perma_disabled(model);
+                }
+                last_err = format!("{model} (HTTP {status}): {msg}");
+            }
+        }
+    }
+
+    if hit_quota {
+        return Err(format!(
+            "{REST_QUOTA_EXHAUSTED_TAG}: Document author REST quota exceeded ({last_err})."
+        ));
+    }
+    Err(format!(
+        "Document author could not complete the request ({last_err})."
     ))
 }
 
