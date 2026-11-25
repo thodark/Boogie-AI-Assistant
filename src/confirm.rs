@@ -93,12 +93,15 @@ pub fn is_protected_process_name(name: &str) -> bool {
     } else {
         format!("{lower}.exe")
     };
+    if with_exe.starts_with("boogie-v") && with_exe.ends_with(".exe") {
+        return true;
+    }
     PROTECTED_PROCESSES
         .iter()
         .any(|p| *p == lower || *p == with_exe)
 }
 
-fn is_sensitive_write_path(path: &str) -> bool {
+pub fn is_sensitive_write_path(path: &str) -> bool {
     let norm = path.trim().replace('/', "\\").to_lowercase();
     norm.starts_with("c:\\windows")
         || norm.starts_with("c:\\program files")
@@ -242,14 +245,37 @@ pub fn evaluate_tool_call(
                     "Blocked writing to protected path: {path}"
                 ));
             }
-            let bytes = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .map(|s| s.len())
-                .unwrap_or(0);
-            PermissionDecision::RequireConfirm {
-                title: "Write / overwrite file".to_string(),
-                detail: format!("Path: {path} ({bytes} bytes)"),
+            // write_file ALWAYS opens the mandatory native Windows Save As picker so the user
+            // explicitly chooses the folder & filename. Escalate to an extra in-app confirm only
+            // when untrusted external content was read earlier in this turn.
+            if saw_untrusted_in_turn {
+                let bytes = args
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                PermissionDecision::RequireConfirm {
+                    title: "Open Save As to write file".to_string(),
+                    detail: format!(
+                        "External data was read in this turn. Suggested: {path} ({bytes} bytes)"
+                    ),
+                }
+            } else {
+                PermissionDecision::Allow
+            }
+        }
+
+        "generate_document" | "generate_qrcode" => {
+            // Both tools ALWAYS open the mandatory native Windows Save As dialog before saving.
+            if saw_untrusted_in_turn {
+                let args_str = args.to_string();
+                let summary = crate::util::truncate_chars(&args_str, 140);
+                PermissionDecision::RequireConfirm {
+                    title: format!("Confirm {tool_name}"),
+                    detail: format!("External data was read in this turn. Args: {summary}"),
+                }
+            } else {
+                PermissionDecision::Allow
             }
         }
 

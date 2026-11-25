@@ -1,6 +1,6 @@
 [package]
 name = "boogie"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Boogie — ultra-fast native Rust real-time voice AI assistant for Windows powered by Gemini Live API"
 license = "MIT"
@@ -86,9 +86,12 @@ url = "2"
 open = "5"
 urlencoding = "2"
 
-# File processing
+# File processing & Document Studio (PDF / Word / Excel + native Save As picker)
 pdf-extract = "0.7"
 calamine = "0.38"
+docx-rs = "0.4"
+rust_xlsxwriter = "0.80"
+rfd = "0.15"
 
 # Web scraping
 scraper = "0.22"

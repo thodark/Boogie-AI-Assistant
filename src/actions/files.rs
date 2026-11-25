@@ -19,9 +19,17 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         tool(
             "write_file",
-            "Write or overwrite content to a file (requires user confirmation).",
+            "Write text content to a file. ALWAYS opens the native Windows Save As dialog so the user \
+             chooses the exact folder and filename before writing (cancels cleanly if the user clicks Cancel).",
             vec![
-                ("path", param("path", "string", "File path to write")),
+                (
+                    "path",
+                    param(
+                        "path",
+                        "string",
+                        "Suggested filename or starting path (user chooses the final save location in Save As dialog)",
+                    ),
+                ),
                 ("content", param("content", "string", "Content to write")),
             ],
             vec!["path", "content"],
@@ -126,25 +134,70 @@ async fn read_file(args: Value) -> ToolResult {
 }
 
 async fn write_file(args: Value) -> ToolResult {
-    let path = args
+    let suggested = args
         .get("path")
         .and_then(|v| v.as_str())
-        .unwrap_or_default()
+        .unwrap_or("note.txt")
+        .trim()
         .to_string();
     let content = args
         .get("content")
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+
     tokio::task::spawn_blocking(move || {
-        if let Some(parent) = Path::new(&path).parent()
+        let suggested_path = Path::new(&suggested);
+        let initial_dir = suggested_path.parent().filter(|p| p.is_dir());
+        let default_name = suggested_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("note.txt");
+        let ext = suggested_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("txt");
+        let exts: Vec<&str> = if ext.is_empty() {
+            vec!["txt"]
+        } else {
+            vec![ext]
+        };
+
+        let chosen = match crate::actions::documents::pick_save_path(
+            "Boogie — Save File As",
+            default_name,
+            "Text / Code File",
+            &exts,
+            initial_dir,
+            true,
+        ) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                crate::confirm::write_audit_log("write_file", "CANCELLED_USER", default_name);
+                return ToolResult::ok(
+                    "User cancelled the Save As dialog. No file was written.".to_string(),
+                );
+            }
+            Err(e) => return ToolResult::err(e),
+        };
+
+        if let Some(parent) = chosen.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent).ok();
         }
-        match std::fs::write(&path, &content) {
-            Ok(_) => ToolResult::ok(format!("wrote {path} ({} bytes)", content.len())),
-            Err(e) => ToolResult::err(format!("cannot write {path}: {e}")),
+        match std::fs::write(&chosen, &content) {
+            Ok(_) => {
+                let chosen_str = chosen.display().to_string();
+                crate::confirm::write_audit_log("write_file", "SAVED", &chosen_str);
+                ToolResult::ok(format!(
+                    "Saved file to {} ({} bytes)",
+                    chosen_str,
+                    content.len()
+                ))
+            }
+            Err(e) => ToolResult::err(format!("cannot write {}: {e}", chosen.display())),
         }
     })
     .await

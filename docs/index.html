@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Boogie — Trợ Lý AI Giọng Nói Cho Windows | Native Rust Voice AI</title>
-  <meta name="description" content="Tải Boogie miễn phí cho Windows (bản Portable, không cần cài code). Trợ lý AI giọng nói thời gian thực chạy Gemini Live API, quả cầu 3D Liquid Glass, 43 công cụ điều khiển máy tính và trí nhớ thông minh." />
+  <meta name="description" content="Tải Boogie miễn phí cho Windows (bản Portable, không cần cài code). Trợ lý AI giọng nói thời gian thực chạy Gemini Live API, quả cầu 3D Liquid Glass, bảng Study Visual + Art Study, xuất PDF/Word/Excel và 46 công cụ Windows." />
   <meta property="og:title" content="Boogie — Native Rust Voice AI Assistant for Windows" />
   <meta property="og:description" content="Open-source JARVIS-style voice AI assistant for Windows. Download portable ZIP/EXE, no coding required. Powered by Gemini Live API & 60 FPS 3D Liquid Glass Orb." />
   <meta property="og:image" content="https://thodark.github.io/Boogie-AI-Assistant/assets/social_preview.png" />
@@ -31,7 +31,7 @@
       <a href="#top" class="brand">
         <img src="assets/logo_icon.png" alt="Boogie" class="brand-icon" />
         <span class="brand-name">BOOGIE</span>
-        <span class="version-pill" id="nav-version">v0.3.0</span>
+        <span class="version-pill" id="nav-version">v0.4.0</span>
       </a>
 
       <nav class="nav-links" id="nav-links" aria-label="Main navigation">
@@ -63,9 +63,9 @@
         <div class="hero-content">
           <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest" target="_blank" rel="noopener" class="release-badge">
             <span class="pulse-dot"></span>
-            <span id="hero-release-tag">v0.3.0</span>
+            <span id="hero-release-tag">v0.4.0</span>
             <span class="badge-sep">·</span>
-            <span data-i18n="hero.badge">Mới v0.3.0: Study Brain giải mọi môn (Cấp 1 → Đại học) chuẩn xác cao</span>
+            <span data-i18n="hero.badge">Mới v0.4.0: Bảng Study Visual + Art Study &amp; Xuất PDF/Word/Excel (chọn chỗ lưu)</span>
           </a>
 
           <h1 class="hero-title" data-i18n="hero.title">
@@ -73,22 +73,22 @@
           </h1>
 
           <p class="hero-subtitle" data-i18n="hero.subtitle">
-            Tải về là chạy ngay — không cần cài đặt phức tạp, không cần biết code. Nói chuyện tự nhiên bằng tiếng Việt hoặc tiếng Anh với phản hồi ~0.58 giây, nhìn thấy màn hình, điều khiển 43 tác vụ Windows và nhớ những gì bạn kể.
+            Tải về là chạy ngay — không cần cài đặt phức tạp, không cần biết code. Nói chuyện tự nhiên tiếng Việt / Anh với phản hồi ~0.58 giây, bảng dạy học tương tác Study Visual (đồ thị, sơ đồ, Art Study), xuất đề cương PDF/Word/Excel có hộp thoại chọn chỗ lưu, điều khiển 46 tác vụ Windows và trí nhớ thông minh.
           </p>
 
           <div class="hero-cta">
-            <a id="hero-zip-btn" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-Windows-x64.zip" class="btn btn-primary btn-lg">
+            <a id="hero-zip-btn" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.0-Windows-x64.zip" class="btn btn-primary btn-lg">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                 <polyline points="7 10 12 15 17 10" />
                 <line x1="12" y1="15" x2="12" y2="3" />
               </svg>
               <span data-i18n="hero.downloadZip">Tải cho Windows (ZIP — Khuyên dùng)</span>
-              <span class="btn-meta" id="hero-zip-size">~11 MB</span>
+              <span class="btn-meta" id="hero-zip-size">~12 MB</span>
             </a>
-            <a id="hero-exe-btn" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/boogie.exe" class="btn btn-secondary btn-lg">
-              <span data-i18n="hero.downloadExe">Bản Portable 1 file (boogie.exe)</span>
-              <span class="btn-meta" id="hero-exe-size">~28 MB</span>
+            <a id="hero-exe-btn" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.0.exe" class="btn btn-secondary btn-lg">
+              <span data-i18n="hero.downloadExe">Bản Portable 1 file (Boogie-v0.4.0.exe)</span>
+              <span class="btn-meta" id="hero-exe-size">~30 MB</span>
             </a>
           </div>
 
@@ -130,7 +130,7 @@
             <div class="stat-label" data-i18n="stats.ram">RAM thực tế siêu nhẹ</div>
           </div>
           <div class="stat-card">
-            <div class="stat-value">44</div>
+            <div class="stat-value">46</div>
             <div class="stat-label" data-i18n="stats.tools">Công cụ Windows &amp; Gia sư AI</div>
           </div>
         </div>
@@ -151,37 +151,37 @@
         <div class="download-grid">
           <article class="glass-card download-card featured">
             <div class="card-badge" data-i18n="download.recommended">Khuyên dùng</div>
-            <h3>Boogie-Windows-x64.zip</h3>
+            <h3 id="card-zip-name">Boogie-v0.4.0-Windows-x64.zip</h3>
             <p class="card-text" data-i18n="download.zipDesc">
-              Gói Portable đầy đủ gồm <code>boogie.exe</code>, mẫu cấu hình, hướng dẫn và giấy phép MIT. Chỉ cần giải nén vào một thư mục cố định (như <code>D:\Boogie\</code>) và mở chạy.
+              Gói Portable đầy đủ gồm <code>Boogie-v0.4.0.exe</code>, mẫu cấu hình, hướng dẫn và giấy phép MIT. Xóa thư mục cũ tải bản mới vẫn giữ nguyên API key và trí nhớ!
             </p>
             <div class="card-meta">
-              <span id="card-zip-version">v0.2.0</span>
+              <span id="card-zip-version">v0.4.0</span>
               <span>·</span>
               <span id="card-zip-size">~11 MB</span>
               <span>·</span>
               <span>Windows x64</span>
             </div>
-            <a id="card-zip-link" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-Windows-x64.zip" class="btn btn-primary btn-block">
+            <a id="card-zip-link" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.0-Windows-x64.zip" class="btn btn-primary btn-block">
               <span data-i18n="download.zipBtn">Tải gói ZIP</span>
             </a>
           </article>
 
           <article class="glass-card download-card">
             <div class="card-badge secondary" data-i18n="download.portable">1 File duy nhất</div>
-            <h3>boogie.exe</h3>
+            <h3 id="card-exe-name">Boogie-v0.4.0.exe</h3>
             <p class="card-text" data-i18n="download.exeDesc">
-              Bản chạy thẳng 1 tệp duy nhất, không cần giải nén. Tự động tạo thư mục <code>config/</code> bên cạnh file để lưu cấu hình, API key và bộ nhớ trên máy bạn.
+              Bản chạy thẳng 1 tệp duy nhất có sẵn số phiên bản trên tên file. API key, cấu hình và trí nhớ được lưu bền vững tại <code>%APPDATA%\Boogie\</code> nên nâng cấp bản mới không bao giờ mất dữ liệu.
             </p>
             <div class="card-meta">
-              <span id="card-exe-version">v0.2.0</span>
+              <span id="card-exe-version">v0.4.0</span>
               <span>·</span>
-              <span id="card-exe-size">~28.3 MB</span>
+              <span id="card-exe-size">~30 MB</span>
               <span>·</span>
               <span>Standalone EXE</span>
             </div>
-            <a id="card-exe-link" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/boogie.exe" class="btn btn-secondary btn-block">
-              <span data-i18n="download.exeBtn">Tải boogie.exe</span>
+            <a id="card-exe-link" href="https://github.com/thodark/Boogie-AI-Assistant/releases/latest/download/Boogie-v0.4.0.exe" class="btn btn-secondary btn-block">
+              <span data-i18n="download.exeBtn">Tải Boogie-v0.4.0.exe</span>
             </a>
           </article>
         </div>
@@ -210,11 +210,11 @@
               </thead>
               <tbody>
                 <tr>
-                  <td><code>Boogie-Windows-x64.zip</code></td>
+                  <td><code id="sha-zip-name">Boogie-v0.4.0-Windows-x64.zip</code></td>
                   <td><code id="sha-zip-hash" class="hash-code">Đang tải từ GitHub...</code></td>
                 </tr>
                 <tr>
-                  <td><code>boogie.exe</code></td>
+                  <td><code id="sha-exe-name">Boogie-v0.4.0.exe</code></td>
                   <td><code id="sha-exe-hash" class="hash-code">Đang tải từ GitHub...</code></td>
                 </tr>
               </tbody>
@@ -222,7 +222,7 @@
           </div>
 
           <div class="code-copy-bar">
-            <code id="ps-verify-cmd">Get-FileHash .\Boogie-Windows-x64.zip -Algorithm SHA256</code>
+            <code id="ps-verify-cmd">Get-FileHash .\Boogie-v0.4.0-Windows-x64.zip -Algorithm SHA256</code>
             <button type="button" class="copy-btn" data-copy-target="ps-verify-cmd" data-i18n="common.copy">Sao chép</button>
           </div>
         </div>
@@ -427,8 +427,18 @@
           <article class="glass-card cl-card">
             <div class="cl-head">
               <div class="cl-version-wrap">
-                <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.3.0" target="_blank" rel="noopener" class="cl-tag">v0.3.0</a>
+                <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.4.0" target="_blank" rel="noopener" class="cl-tag">v0.4.0</a>
                 <span class="cl-badge" data-i18n="cl.latest">Mới nhất</span>
+              </div>
+              <span class="cl-date">2026-11-26</span>
+            </div>
+            <ul class="cl-items" id="cl-v040"></ul>
+          </article>
+
+          <article class="glass-card cl-card">
+            <div class="cl-head">
+              <div class="cl-version-wrap">
+                <a href="https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.3.0" target="_blank" rel="noopener" class="cl-tag secondary">v0.3.0</a>
               </div>
               <span class="cl-date">2026-11-25</span>
             </div>

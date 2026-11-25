@@ -1,10 +1,12 @@
 use crate::tools::{ToolRegistry, ToolResult};
 use crate::util::encode_rgba_to_jpeg;
+use crate::{AppEvent, ChimeKind};
 use serde_json::Value;
+use tokio::sync::broadcast;
 
 use super::{param, tool};
 
-pub fn register(registry: &mut ToolRegistry) {
+pub fn register(registry: &mut ToolRegistry, event_tx: broadcast::Sender<AppEvent>) {
     registry.register(
         tool(
             "screen_process",
@@ -16,7 +18,10 @@ pub fn register(registry: &mut ToolRegistry) {
             vec![("monitor", param("monitor", "integer", "Monitor index (0-based, default 0)"))],
             vec![],
         ),
-        Box::new(|args| Box::pin(capture_screen_vision(args))),
+        Box::new(move |args| {
+            let tx = event_tx.clone();
+            Box::pin(capture_screen_vision(args, tx))
+        }),
     );
 
     registry.register(
@@ -68,7 +73,7 @@ pub fn register(registry: &mut ToolRegistry) {
     );
 }
 
-async fn capture_screen_vision(args: Value) -> ToolResult {
+async fn capture_screen_vision(args: Value, event_tx: broadcast::Sender<AppEvent>) -> ToolResult {
     let monitor = args.get("monitor").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
     tokio::task::spawn_blocking(move || match screenshots::Screen::all() {
@@ -77,6 +82,8 @@ async fn capture_screen_vision(args: Value) -> ToolResult {
                 let info = screen.display_info;
                 match screen.capture() {
                     Ok(img) => {
+                        // Fire shutter chime the instant raw screen pixels are safely captured!
+                        let _ = event_tx.send(AppEvent::PlayChime(ChimeKind::ScreenCaptured));
                         let (orig_w, orig_h) = (img.width(), img.height());
                         match encode_rgba_to_jpeg(img.as_raw(), orig_w, orig_h, 1920, 92) {
                             Ok((jpeg, out_w, out_h)) => {

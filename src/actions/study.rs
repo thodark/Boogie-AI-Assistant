@@ -1,5 +1,6 @@
 use base64::Engine as _;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -7,29 +8,67 @@ use tokio::sync::broadcast;
 use crate::AppEvent;
 use crate::config::{ApiConfig, StudyBrainMode};
 use crate::tools::{ToolRegistry, ToolResult};
-use crate::util::{encode_rgba_to_png, truncate_chars};
+use crate::util::{encode_rgba_to_jpeg, encode_rgba_to_png, truncate_chars};
 
 use super::{param, tool};
 
-const PRO_MODEL: &str = "gemini-2.5-pro";
+const PRO_MODEL: &str = "gemini-3.1-pro-preview";
 const FLASH_MODEL: &str = "gemini-2.5-flash";
+// Live-verified fast REST models (avoids retired 2.0-* 404s and slow-hanging preview models).
+// If both hit quota/503, callers drop instantaneously into zero-quota Direct Live Vision / Direct Board mode!
+const FAST_FALLBACK_MODELS: &[&str] = &[FLASH_MODEL, "gemini-3.1-flash-lite"];
 const PRO_RATE_LIMIT_BACKOFF_SECS: u64 = 120;
-const STUDY_MAX_PNG_DIM: u32 = 2560;
+const STUDY_MAX_SCREEN_DIM: u32 = 1920;
+const STUDY_MAX_CLIPBOARD_DIM: u32 = 2200;
+
+pub(crate) const REST_QUOTA_EXHAUSTED_TAG: &str = "REST_QUOTA_EXHAUSTED";
 
 static STUDY_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static FAST_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static PRO_COOLDOWN_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+static PERMA_UNAVAILABLE_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-fn study_http_client() -> &'static reqwest::Client {
-    STUDY_HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(48))
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .unwrap_or_default()
-    })
+fn study_http_client(fast_lane: bool) -> &'static reqwest::Client {
+    if fast_lane {
+        FAST_HTTP_CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(35))
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default()
+        })
+    } else {
+        STUDY_HTTP_CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(65))
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default()
+        })
+    }
+}
+
+fn is_model_perma_disabled(model: &str) -> bool {
+    PERMA_UNAVAILABLE_MODELS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .ok()
+        .is_some_and(|set| set.contains(model))
+}
+
+fn mark_model_perma_disabled(model: &str) {
+    if let Ok(mut set) = PERMA_UNAVAILABLE_MODELS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+    {
+        set.insert(model.to_string());
+    }
 }
 
 fn is_pro_in_cooldown() -> bool {
+    if is_model_perma_disabled(PRO_MODEL) {
+        return true;
+    }
     let lock = PRO_COOLDOWN_UNTIL.get_or_init(|| Mutex::new(None));
     match lock.lock().ok().and_then(|g| *g) {
         Some(until) => Instant::now() < until,
@@ -55,6 +94,8 @@ pub fn register(registry: &mut ToolRegistry, event_tx: broadcast::Sender<AppEven
              Captures lossless full-resolution PNG of the screen or clipboard snip (Win+Shift+S), \
              runs high-resolution OCR + step-by-step deep thinking + double-check verification \
              so signs (+/-), exponents, fractions, and final answers are accurate. \
+             IMPORTANT: ALWAYS speak ONE brief natural sentence aloud FIRST (e.g. 'Đợi mình chút, \
+             để mình đọc kỹ đề rồi giải cẩn thận cho bạn nhé') BEFORE emitting this tool call. \
              ALWAYS use this instead of screen_process whenever the user asks to solve, calculate, \
              check homework, answer a quiz/exam, read equations/formulas, debug code on screen, \
              or study any subject.",
@@ -125,27 +166,47 @@ pub fn register(registry: &mut ToolRegistry, event_tx: broadcast::Sender<AppEven
     );
 }
 
-struct CapturedImage {
-    png_bytes: Vec<u8>,
-    width: u32,
-    height: u32,
-    source_desc: String,
+pub(crate) struct CapturedImage {
+    pub bytes: Vec<u8>,
+    pub mime_type: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub source_desc: String,
 }
 
-fn capture_clipboard_png() -> Result<CapturedImage, String> {
+pub(crate) fn capture_clipboard_png(
+    notify_tx: Option<&broadcast::Sender<AppEvent>>,
+) -> Result<CapturedImage, String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
     let img = cb
         .get_image()
         .map_err(|_| "No image found in clipboard. Ask the user to snip the problem with Win+Shift+S first, or switch source to 'screen'.".to_string())?;
+    if let Some(tx) = notify_tx {
+        let _ = tx.send(AppEvent::PlayChime(crate::ChimeKind::ScreenCaptured));
+    }
     let w = img.width as u32;
     let h = img.height as u32;
-    let (png, out_w, out_h) = encode_rgba_to_png(&img.bytes, w, h, STUDY_MAX_PNG_DIM)?;
-    Ok(CapturedImage {
-        png_bytes: png,
-        width: out_w,
-        height: out_h,
-        source_desc: format!("clipboard snip ({out_w}x{out_h} lossless PNG)"),
-    })
+    // Small clipboard snips stay lossless PNG; large snips use ultra-crisp Q95 JPEG for speed
+    if (w as u64) * (h as u64) <= 900_000 {
+        let (png, out_w, out_h) = encode_rgba_to_png(&img.bytes, w, h, STUDY_MAX_CLIPBOARD_DIM)?;
+        Ok(CapturedImage {
+            bytes: png,
+            mime_type: "image/png",
+            width: out_w,
+            height: out_h,
+            source_desc: format!("clipboard snip ({out_w}x{out_h} lossless PNG)"),
+        })
+    } else {
+        let (jpg, out_w, out_h) =
+            encode_rgba_to_jpeg(&img.bytes, w, h, STUDY_MAX_CLIPBOARD_DIM, 95)?;
+        Ok(CapturedImage {
+            bytes: jpg,
+            mime_type: "image/jpeg",
+            width: out_w,
+            height: out_h,
+            source_desc: format!("clipboard snip ({out_w}x{out_h} Q95 JPEG)"),
+        })
+    }
 }
 
 fn pick_best_monitor(screens: &[screenshots::Screen], requested: Option<usize>) -> usize {
@@ -177,6 +238,39 @@ fn pick_best_monitor(screens: &[screenshots::Screen], requested: Option<usize>) 
 }
 
 #[cfg(windows)]
+pub(crate) fn bring_boogie_window_to_front() {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, HWND_NOTOPMOST, HWND_TOPMOST, SW_SHOW, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        SetForegroundWindow, SetWindowPos, ShowWindow,
+    };
+    use windows::core::PCWSTR;
+
+    let versioned_title = format!("Boogie v{}", env!("CARGO_PKG_VERSION"));
+    for candidate in [versioned_title.as_str(), "Boogie"] {
+        let title: Vec<u16> = OsStr::new(candidate)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            if let Ok(hwnd) = FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                // Briefly toggle topmost so Windows reliably surfaces Boogie & Save As above Chrome/VS Code
+                let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+                let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+                let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+                let _ = SetForegroundWindow(hwnd);
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn bring_boogie_window_to_front() {}
+
+#[cfg(windows)]
 fn find_boogie_window_center() -> Option<(i32, i32)> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
@@ -184,19 +278,28 @@ fn find_boogie_window_center() -> Option<(i32, i32)> {
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
     use windows::core::PCWSTR;
 
-    let title: Vec<u16> = OsStr::new("Boogie")
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    unsafe {
-        let hwnd = FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())).ok()?;
-        let mut rect = RECT::default();
-        GetWindowRect(hwnd, &mut rect).ok()?;
-        Some(((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2))
+    let versioned_title = format!("Boogie v{}", env!("CARGO_PKG_VERSION"));
+    for candidate in [versioned_title.as_str(), "Boogie"] {
+        let title: Vec<u16> = OsStr::new(candidate)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            if let Ok(hwnd) = FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) {
+                let mut rect = RECT::default();
+                if GetWindowRect(hwnd, &mut rect).is_ok() {
+                    return Some(((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2));
+                }
+            }
+        }
     }
+    None
 }
 
-fn capture_screen_png(monitor_opt: Option<usize>) -> Result<CapturedImage, String> {
+pub(crate) fn capture_screen_png(
+    monitor_opt: Option<usize>,
+    notify_tx: Option<&broadcast::Sender<AppEvent>>,
+) -> Result<CapturedImage, String> {
     let screens = screenshots::Screen::all().map_err(|e| format!("screen list failed: {e}"))?;
     if screens.is_empty() {
         return Err("No monitors detected.".to_string());
@@ -208,13 +311,21 @@ fn capture_screen_png(monitor_opt: Option<usize>) -> Result<CapturedImage, Strin
     let img = screen
         .capture()
         .map_err(|e| format!("screen capture failed: {e}"))?;
+    // Fire shutter beep IMMEDIATELY (~25ms) once raw screen pixels are safely in RAM
+    // BEFORE image encoding — so the user can Alt+Tab right away!
+    if let Some(tx) = notify_tx {
+        let _ = tx.send(AppEvent::PlayChime(crate::ChimeKind::ScreenCaptured));
+    }
     let (orig_w, orig_h) = (img.width(), img.height());
-    let (png, out_w, out_h) = encode_rgba_to_png(img.as_raw(), orig_w, orig_h, STUDY_MAX_PNG_DIM)?;
+    // High-resolution Q95 JPEG: sharp text & math signs at ~6-8x smaller payload and ~50x faster encode than PNG!
+    let (jpg, out_w, out_h) =
+        encode_rgba_to_jpeg(img.as_raw(), orig_w, orig_h, STUDY_MAX_SCREEN_DIM, 95)?;
     Ok(CapturedImage {
-        png_bytes: png,
+        bytes: jpg,
+        mime_type: "image/jpeg",
         width: out_w,
         height: out_h,
-        source_desc: format!("monitor {idx} ({out_w}x{out_h} lossless PNG)"),
+        source_desc: format!("monitor {idx} ({out_w}x{out_h} crisp Q95 JPEG)"),
     })
 }
 
@@ -276,70 +387,131 @@ fn build_study_system_prompt(subject: &str, level: &str, mode: &str, language: &
             - For Programming/CS/SQL: trace execution line-by-line on edge cases and check syntax/complexity.\n\
             - For English/Languages/Literature/History/Geography: verify grammar rules, tense/context, exact \
               historical facts, and textual evidence.\n\
-         3. CLEAN OUTPUT FORMAT (in {language}, plain readable Unicode math like x², √, π, ≤, ≥, ≠, → — avoid messy raw LaTeX backslashes):\n\
-            - **Đề bài / Problem:** (short verbatim transcription of the problem read — omit if purely conceptual)\n\
-            - **Đáp án / Answer:** (crystal-clear final answer or option letter, placed right near the top — unless mode is 'hint')\n\
-            - **Cách giải / Steps:** (concise, numbered, easy-to-follow steps)\n\
-            - **Kiểm tra lại / Verification:** (1 short line confirming substitution / signs / units / logic check)\n\
-         Keep the response crisp, well-structured, and ready both to be read on screen AND summarized aloud."
+         3. ULTRA-CONCISE CLEAN OUTPUT FORMAT (in {language}, plain readable Unicode math like x², √, π, ≤, ≥, ≠, → — avoid raw LaTeX backslashes; keep total reply crisp and under ~120 words unless user explicitly asks for full long proof):
+            - **Đề bài:** (1 short line of the exact problem/question read)
+            - **Đáp án:** (crystal-clear final answer or option letter A/B/C/D right on top — unless mode is 'hint')
+            - **Cách giải:** (3 to 5 super tight, numbered steps — no filler)
+            - **Kiểm tra:** (1 short line confirming sign/substitution check)"
     )
 }
 
-fn select_model_chain(mode: StudyBrainMode) -> Vec<&'static str> {
-    match mode {
-        StudyBrainMode::Pro => vec![PRO_MODEL, FLASH_MODEL],
-        StudyBrainMode::Flash => vec![FLASH_MODEL],
-        StudyBrainMode::Auto => {
-            if is_pro_in_cooldown() {
-                vec![FLASH_MODEL]
-            } else {
-                vec![PRO_MODEL, FLASH_MODEL]
-            }
-        }
+pub(crate) fn captured_to_jpeg(img: &CapturedImage) -> Result<Vec<u8>, String> {
+    if img.mime_type == "image/jpeg" {
+        return Ok(img.bytes.clone());
     }
+    let dyn_img = image::load_from_memory(&img.bytes)
+        .map_err(|e| format!("decode image for live vision: {e}"))?;
+    let rgba = dyn_img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let (jpg, _, _) = encode_rgba_to_jpeg(rgba.as_raw(), w, h, STUDY_MAX_SCREEN_DIM, 95)?;
+    Ok(jpg)
 }
 
+fn model_supports_thinking(model: &str) -> bool {
+    model.contains("2.5") || model.contains("3.") || model.contains("3-")
+}
+
+fn is_quota_exhausted_for_session(status: u16, msg: &str) -> bool {
+    if status == 404 {
+        return true;
+    }
+    if status == 429 {
+        let lower = msg.to_ascii_lowercase();
+        return lower.contains("limit: 0")
+            || lower.contains("per day")
+            || lower.contains("perday")
+            || lower.contains("free_tier_requests")
+            || lower.contains("daily");
+    }
+    false
+}
+
+fn select_fast_model_chain() -> Vec<&'static str> {
+    FAST_FALLBACK_MODELS
+        .iter()
+        .copied()
+        .filter(|m| !is_model_perma_disabled(m))
+        .collect()
+}
+
+fn select_model_chain(mode: StudyBrainMode) -> Vec<&'static str> {
+    let mut chain = Vec::new();
+    if mode == StudyBrainMode::Pro && !is_pro_in_cooldown() {
+        chain.push(PRO_MODEL);
+    }
+    // Auto & Flash use fast multi-model cascade directly so free-tier keys never waste 3-4s on
+    // a 429 limit:0 Pro attempt, and automatically rotate across free-tier model buckets if one
+    // hits its 20 req/day limit.
+    for &m in FAST_FALLBACK_MODELS {
+        if !is_model_perma_disabled(m) {
+            chain.push(m);
+        }
+    }
+    chain
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn call_gemini_study(
     api_key: &str,
     model: &str,
     system_prompt: &str,
     user_prompt: &str,
     image: Option<&CapturedImage>,
+    json_mode: bool,
+    max_output_tokens: u32,
+    thinking_budget: Option<u32>,
+    fast_lane: bool,
 ) -> Result<String, (u16, String)> {
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    );
+    // Pass API key via x-goog-api-key header (never in URL) so error logs can never leak keys.
+    let url =
+        format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
 
     let mut parts = Vec::new();
     if let Some(img) = image {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&img.png_bytes);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
         parts.push(json!({
             "inlineData": {
-                "mimeType": "image/png",
+                "mimeType": img.mime_type,
                 "data": b64
             }
         }));
     }
     parts.push(json!({ "text": user_prompt }));
 
-    // Try with high media resolution + thinking budget first; if API rejects optional config with 400, retry cleanly.
-    let gen_configs = [
-        json!({
-            "temperature": 0.1,
-            "maxOutputTokens": 4096,
-            "mediaResolution": "MEDIA_RESOLUTION_HIGH",
-            "thinkingConfig": { "thinkingBudget": 8192 }
-        }),
-        json!({
-            "temperature": 0.1,
-            "maxOutputTokens": 4096,
-            "thinkingConfig": { "thinkingBudget": 8192 }
-        }),
-        json!({
-            "temperature": 0.1,
-            "maxOutputTokens": 4096
-        }),
-    ];
+    // Build graceful config cascade: full (high media + thinking) -> thinking -> basic.
+    // Note: Keep thinkingBudget modest relative to maxOutputTokens so JSON outputs never truncate!
+    let mut gen_configs = Vec::new();
+    if let Some(budget) = thinking_budget {
+        if image.is_some() {
+            let mut c = json!({
+                "temperature": 0.15,
+                "maxOutputTokens": max_output_tokens,
+                "mediaResolution": "MEDIA_RESOLUTION_HIGH",
+                "thinkingConfig": { "thinkingBudget": budget }
+            });
+            if json_mode {
+                c["responseMimeType"] = json!("application/json");
+            }
+            gen_configs.push(c);
+        }
+        let mut c = json!({
+            "temperature": 0.15,
+            "maxOutputTokens": max_output_tokens,
+            "thinkingConfig": { "thinkingBudget": budget }
+        });
+        if json_mode {
+            c["responseMimeType"] = json!("application/json");
+        }
+        gen_configs.push(c);
+    }
+    let mut cfg_basic = json!({
+        "temperature": 0.15,
+        "maxOutputTokens": max_output_tokens
+    });
+    if json_mode {
+        cfg_basic["responseMimeType"] = json!("application/json");
+    }
+    gen_configs.push(cfg_basic);
 
     let mut last_err = (0u16, "no attempt".to_string());
 
@@ -355,15 +527,36 @@ async fn call_gemini_study(
             "generationConfig": gen_cfg
         });
 
-        let resp = match study_http_client().post(&url).json(&body).send().await {
+        let started = Instant::now();
+        let resp = match study_http_client(fast_lane)
+            .post(&url)
+            .header("x-goog-api-key", api_key)
+            .json(&body)
+            .send()
+            .await
+        {
             Ok(r) => r,
-            Err(e) => return Err((0, format!("network/timeout error: {e}"))),
+            Err(e) => {
+                let kind = if e.is_timeout() {
+                    "request timed out"
+                } else if e.is_connect() {
+                    "connection failed"
+                } else {
+                    "network error"
+                };
+                return Err((0, format!("{kind} calling {model}")));
+            }
         };
 
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
 
         if status == 200 {
+            tracing::info!(
+                "study brain {model} responded in {}ms ({} chars)",
+                started.elapsed().as_millis(),
+                text.len()
+            );
             let parsed: Value = serde_json::from_str(&text)
                 .map_err(|e| (200, format!("json decode failed: {e}")))?;
             if let Some(answer) = extract_answer_text(&parsed) {
@@ -386,7 +579,7 @@ async fn call_gemini_study(
         // Only strip optional config fields if server returned 400 Invalid Argument
         if status == 400 && attempt + 1 < gen_configs.len() {
             tracing::warn!(
-                "study_solve ({model}) 400 on attempt {}: {err_detail} — retrying simpler config",
+                "study brain ({model}) 400 on attempt {}: {err_detail} — retrying simpler config",
                 attempt + 1
             );
             continue;
@@ -395,6 +588,125 @@ async fn call_gemini_study(
     }
 
     Err(last_err)
+}
+
+/// Shared Deep Study Brain cascade (Pro -> Flash fallback with rate-limit cooldown & 404 skip).
+/// When `fast_lane` is true (used by interactive `study_board` & `generate_document`), prefers
+/// `gemini-2.5-flash` immediately with zero-thinking budget so responses arrive in ~2–6 seconds.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn call_study_brain(
+    cfg: &ApiConfig,
+    system_prompt: &str,
+    user_prompt: &str,
+    image: Option<&CapturedImage>,
+    json_mode: bool,
+    max_output_tokens: u32,
+    thinking_budget: Option<u32>,
+    fast_lane: bool,
+) -> Result<(String, &'static str), String> {
+    let api_key = cfg.api_key();
+    if api_key.is_empty() {
+        return Err("Gemini API key is missing.".to_string());
+    }
+
+    let models = if fast_lane {
+        select_fast_model_chain()
+    } else {
+        select_model_chain(cfg.study_brain_mode())
+    };
+    if models.is_empty() {
+        return Err(format!(
+            "{REST_QUOTA_EXHAUSTED_TAG}: All Gemini REST models have reached their daily quota for this session."
+        ));
+    }
+
+    let mut last_err = String::new();
+    let mut hit_quota = false;
+
+    for model in models {
+        let effective_think = thinking_budget.filter(|_| model_supports_thinking(model));
+        tracing::info!(
+            "study brain invoking {model} (json_mode={json_mode}, fast_lane={fast_lane}, think={:?})",
+            effective_think
+        );
+        match call_gemini_study(
+            api_key,
+            model,
+            system_prompt,
+            user_prompt,
+            image,
+            json_mode,
+            max_output_tokens,
+            effective_think,
+            fast_lane,
+        )
+        .await
+        {
+            Ok(ans) => return Ok((ans, model)),
+            Err((status, msg)) => {
+                tracing::warn!("study brain {model} failed (HTTP {status}): {msg}");
+                if status == 429 {
+                    hit_quota = true;
+                }
+                if is_quota_exhausted_for_session(status, &msg) {
+                    mark_model_perma_disabled(model);
+                } else if model == PRO_MODEL && (status == 429 || status == 503) {
+                    mark_pro_rate_limited();
+                }
+                last_err = format!("{model} (HTTP {status}): {msg}");
+            }
+        }
+    }
+
+    if hit_quota {
+        return Err(format!(
+            "{REST_QUOTA_EXHAUSTED_TAG}: Study Brain REST quota exceeded ({last_err})."
+        ));
+    }
+    Err(format!(
+        "Study Brain could not complete the request ({last_err}). Try again or switch Study Brain to Flash Direct Vision in Settings."
+    ))
+}
+
+/// Strips optional markdown ```json ... ``` fences and locates the outermost JSON object.
+pub(crate) fn extract_json_payload(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```JSON"))
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(|s| s.trim_start())
+        .unwrap_or(trimmed);
+    let stripped = stripped
+        .strip_suffix("```")
+        .map(|s| s.trim_end())
+        .unwrap_or(stripped);
+    if let (Some(start), Some(end)) = (stripped.find('{'), stripped.rfind('}'))
+        && start <= end
+    {
+        return &stripped[start..=end];
+    }
+    stripped
+}
+
+/// Recursively strips explicit `null` values from JSON objects and arrays so `#[serde(default)]`
+/// fields never fail deserialization with `invalid type: null, expected a string/sequence`.
+pub(crate) fn strip_json_nulls(val: &mut Value) {
+    match val {
+        Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_json_nulls(v);
+            }
+        }
+        Value::Array(arr) => {
+            arr.retain(|v| !v.is_null());
+            for v in arr.iter_mut() {
+                strip_json_nulls(v);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Extracts non-thought answer text from Gemini REST `generateContent` JSON.
@@ -463,8 +775,7 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
         Ok(c) => c,
         Err(e) => return ToolResult::err(format!("Cannot load Gemini API config: {e}")),
     };
-    let api_key = cfg.api_key().to_string();
-    if api_key.is_empty() {
+    if cfg.api_key().is_empty() {
         return ToolResult::err("Gemini API key is missing.");
     }
 
@@ -476,26 +787,41 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
         .map(ToString::to_string)
         .unwrap_or_else(|| crate::config::detect_language(&crate::config::load_memory()));
 
-    // 1. Capture lossless high-resolution image when requested
+    // 1. Capture high-resolution screen/clipboard image (shutter beep fires at ~25ms before encode!)
+    let progress_guard = crate::actions::documents::TaskProgressGuard::new(
+        event_tx.clone(),
+        "Study Brain",
+        "Bước 1/3 · Đang chụp màn hình...",
+        0.20,
+        truncate_chars(&question, 54),
+    );
     let captured: Option<CapturedImage> = match source.as_str() {
         "text" | "none" => None,
-        "clipboard" => match tokio::task::spawn_blocking(capture_clipboard_png).await {
-            Ok(Ok(img)) => Some(img),
-            Ok(Err(e)) => return ToolResult::err(e),
-            Err(e) => return ToolResult::err(format!("clipboard capture task failed: {e}")),
-        },
-        _ => match tokio::task::spawn_blocking(move || capture_screen_png(monitor)).await {
-            Ok(Ok(img)) => Some(img),
-            Ok(Err(e)) => return ToolResult::err(e),
-            Err(e) => return ToolResult::err(format!("screen capture task failed: {e}")),
-        },
+        "clipboard" => {
+            let tx_cap = event_tx.clone();
+            match tokio::task::spawn_blocking(move || capture_clipboard_png(Some(&tx_cap))).await {
+                Ok(Ok(img)) => Some(img),
+                Ok(Err(e)) => return ToolResult::err(e),
+                Err(e) => return ToolResult::err(format!("clipboard capture task failed: {e}")),
+            }
+        }
+        _ => {
+            let tx_cap = event_tx.clone();
+            match tokio::task::spawn_blocking(move || capture_screen_png(monitor, Some(&tx_cap)))
+                .await
+            {
+                Ok(Ok(img)) => Some(img),
+                Ok(Err(e)) => return ToolResult::err(e),
+                Err(e) => return ToolResult::err(format!("screen capture task failed: {e}")),
+            }
+        }
     };
 
     if let Some(ref img) = captured {
         tracing::info!(
             "study_solve captured {} ({} KB, {}x{})",
             img.source_desc,
-            img.png_bytes.len() / 1024,
+            img.bytes.len() / 1024,
             img.width,
             img.height
         );
@@ -516,43 +842,91 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
         )
     };
 
-    // 2. Execute deep reasoning via configured Study Brain model cascade (Pro -> Flash fallback)
-    let models = select_model_chain(cfg.study_brain_mode());
-    let mut final_answer: Option<(String, &str)> = None;
-    let mut last_err = String::new();
-
-    for model in models {
-        tracing::info!(
-            "study_solve invoking {model} (subject={subject}, level={level}, mode={mode}, source={source})"
+    // 2. Execute reasoning via configured Study Brain mode
+    // - Flash Direct Vision: passes crisp 1920px Q95 JPEG directly into Gemini Live (~1.2s total, ZERO REST quota!)
+    // - Auto (Verified Fast Thinking): thinkingBudget = 512 on multi-model REST cascade (~1.8-3s), with
+    //   automatic zero-quota fallback to Direct Crisp Live Vision if all REST buckets hit 20/day limit!
+    // - Pro 3.1 Deep Thinking: thinkingBudget = 2048 on Pro -> fast cascade -> Direct Crisp Live Vision fallback
+    let mode_cfg = cfg.study_brain_mode();
+    if mode_cfg == StudyBrainMode::Flash
+        && let Some(ref img) = captured
+        && let Ok(jpeg) = captured_to_jpeg(img)
+    {
+        progress_guard.update("⚡ Đã gửi ảnh sắc nét trực tiếp cho Boogie Live!", 0.96);
+        let _ = event_tx.send(AppEvent::Log(format!(
+            "Study [live-vision-fast]: Captured {} ({} KB) -> Direct Live Vision",
+            img.source_desc,
+            jpeg.len() / 1024
+        )));
+        return ToolResult::ok_with_image(
+            format!(
+                "[DIRECT CRISP LIVE VISION ({}) — answer immediately! Carefully read every digit, sign (+/-), exponent, subscript, and option A/B/C/D in the attached high-res screenshot, double-check your calculation silently, then give the exact final answer and 2-3 tight steps in {language} matching level={level}, mode={mode}. Request: {question}]",
+                img.source_desc
+            ),
+            jpeg,
         );
-        match call_gemini_study(
-            &api_key,
-            model,
-            &system_prompt,
-            &user_prompt,
-            captured.as_ref(),
-        )
-        .await
-        {
-            Ok(ans) => {
-                final_answer = Some((ans, model));
-                break;
-            }
-            Err((status, msg)) => {
-                tracing::warn!("study_solve {model} failed (HTTP {status}): {msg}");
-                if model == PRO_MODEL && (status == 429 || status == 503 || status == 404) {
-                    mark_pro_rate_limited();
-                }
-                last_err = format!("{model} (HTTP {status}): {msg}");
-            }
-        }
     }
 
-    let Some((answer, used_model)) = final_answer else {
-        return ToolResult::err(format!(
-            "Study Brain could not complete the request ({last_err}). Try again or switch Study Brain to Flash in Settings."
-        ));
+    let think_budget = match mode_cfg {
+        StudyBrainMode::Flash => Some(0),
+        StudyBrainMode::Auto => Some(512),
+        StudyBrainMode::Pro => Some(2048),
     };
+    progress_guard.update(
+        if captured.is_some() {
+            "📸 Đã chụp xong! Có thể Alt+Tab — đang đọc dấu & giải..."
+        } else {
+            "Bước 2/3 · Đang giải & kiểm chứng đáp án..."
+        },
+        0.52,
+    );
+    let (answer, used_model) = match call_study_brain(
+        &cfg,
+        &system_prompt,
+        &user_prompt,
+        captured.as_ref(),
+        false,
+        4096,
+        think_budget,
+        false,
+    )
+    .await
+    {
+        Ok(res) => res,
+        Err(err) => {
+            // Zero-quota resilience: NEVER fail a study question just because REST hit 20/day!
+            // Fall back seamlessly to Gemini Live's native crisp vision or direct reasoning.
+            if let Some(ref img) = captured
+                && let Ok(jpeg) = captured_to_jpeg(img)
+            {
+                tracing::warn!(
+                    "study_solve REST unavailable ({err}); seamlessly falling back to Direct Crisp Live Vision"
+                );
+                progress_guard.update("⚡ Chuyển sang Live Vision sắc nét trực tiếp...", 0.94);
+                let _ = event_tx.send(AppEvent::Log(format!(
+                    "Study [live-vision-fallback]: Captured {} -> Direct Live Vision",
+                    img.source_desc
+                )));
+                return ToolResult::ok_with_image(
+                    format!(
+                        "[DIRECT CRISP LIVE VISION FALLBACK ({}) — secondary REST solver is temporarily at quota, so YOU solve directly from this high-res screenshot! Do NOT say the tool failed. Carefully inspect every digit, sign (+/-), exponent, and option A/B/C/D, double-check your answer silently, and give a clear concise solution in {language} (level={level}, mode={mode}). Request: {question}]",
+                        img.source_desc
+                    ),
+                    jpeg,
+                );
+            }
+            if err.contains(REST_QUOTA_EXHAUSTED_TAG) {
+                tracing::warn!(
+                    "study_solve text REST quota exhausted; delegating cleanly to Gemini Live"
+                );
+                return ToolResult::ok(format!(
+                    "[DIRECT LIVE SOLVE — secondary REST solver reached daily quota, so solve this directly yourself in {language} (level={level}, mode={mode}) without mentioning any error. Double-check every sign and calculation. Request: {question}]"
+                ));
+            }
+            return ToolResult::err(err);
+        }
+    };
+    progress_guard.update("Bước 3/3 · Hoàn tất lời giải!", 0.96);
 
     // 3. Push full crisp visual solution directly into Boogie's Conversation Drawer (with Copy button!)
     let _ = event_tx.send(AppEvent::Log(format!("Study [{used_model}]: {answer}")));
@@ -587,11 +961,79 @@ mod tests {
 
     #[test]
     fn model_chain_respects_study_brain_mode() {
-        assert_eq!(select_model_chain(StudyBrainMode::Flash), vec![FLASH_MODEL]);
-        assert_eq!(
-            select_model_chain(StudyBrainMode::Pro),
-            vec![PRO_MODEL, FLASH_MODEL]
-        );
+        let flash_chain = select_model_chain(StudyBrainMode::Flash);
+        assert_eq!(flash_chain.first().copied(), Some(FLASH_MODEL));
+        assert!(flash_chain.contains(&"gemini-3.1-flash-lite"));
+
+        let pro_chain = select_model_chain(StudyBrainMode::Pro);
+        assert_eq!(pro_chain.first().copied(), Some(PRO_MODEL));
+        assert!(pro_chain.contains(&FLASH_MODEL));
+    }
+
+    #[test]
+    fn daily_quota_and_404_detection_works() {
+        assert!(is_quota_exhausted_for_session(404, "model not found"));
+        assert!(is_quota_exhausted_for_session(
+            429,
+            "Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, requests per day"
+        ));
+        assert!(is_quota_exhausted_for_session(
+            429,
+            "Quota exceeded, limit: 0 for gemini-3.1-pro-preview"
+        ));
+        // Temporary per-minute burst should NOT permanently disable a model
+        assert!(!is_quota_exhausted_for_session(
+            429,
+            "Resource exhausted: requests per minute limit exceeded, retry in 10s"
+        ));
+        assert!(model_supports_thinking("gemini-2.5-flash"));
+        assert!(model_supports_thinking("gemini-3.1-flash-lite"));
+        assert!(!model_supports_thinking("gemini-2.0-flash"));
+    }
+
+    #[test]
+    fn captured_image_converts_png_and_jpeg_cleanly_for_live_vision() {
+        // Deterministic test (works on unlocked desktops, locked screens, and headless CI alike)
+        let mut rgba = vec![0u8; 64 * 48 * 4];
+        for i in 0..(64 * 48) {
+            rgba[i * 4] = (i % 255) as u8;
+            rgba[i * 4 + 1] = 120;
+            rgba[i * 4 + 2] = 210;
+            rgba[i * 4 + 3] = 255;
+        }
+        let (png, w, h) = encode_rgba_to_png(&rgba, 64, 48, STUDY_MAX_SCREEN_DIM).unwrap();
+        let cap_png = CapturedImage {
+            bytes: png,
+            mime_type: "image/png",
+            width: w,
+            height: h,
+            source_desc: "synthetic clipboard snip".to_string(),
+        };
+        let converted_jpg = captured_to_jpeg(&cap_png).expect("PNG -> JPEG conversion must work");
+        assert!(converted_jpg.starts_with(&[0xFF, 0xD8]));
+
+        let cap_jpg = CapturedImage {
+            bytes: converted_jpg.clone(),
+            mime_type: "image/jpeg",
+            width: w,
+            height: h,
+            source_desc: "synthetic screen".to_string(),
+        };
+        let passthrough = captured_to_jpeg(&cap_jpg).expect("JPEG passthrough must work");
+        assert_eq!(passthrough, converted_jpg);
+
+        // When running on an unlocked interactive desktop, also verify live capture + shutter chime.
+        if std::env::var("CI").is_err() {
+            let (tx, mut rx) = broadcast::channel(8);
+            if let Ok(img) = capture_screen_png(None, Some(&tx)) {
+                assert_eq!(img.mime_type, "image/jpeg");
+                assert!(img.bytes.starts_with(&[0xFF, 0xD8]));
+                assert!(matches!(
+                    rx.try_recv(),
+                    Ok(AppEvent::PlayChime(crate::ChimeKind::ScreenCaptured))
+                ));
+            }
+        }
     }
 
     #[test]

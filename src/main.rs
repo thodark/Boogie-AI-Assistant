@@ -10,6 +10,7 @@ mod gui;
 mod memory;
 mod orb_shader;
 mod proactive;
+mod study_visual;
 mod theme;
 mod tools;
 mod util;
@@ -28,10 +29,10 @@ use crate::util::truncate_chars;
 
 pub const SEND_SAMPLE_RATE: u32 = 16_000;
 pub const RECV_SAMPLE_RATE: u32 = 24_000;
-const RESPONSE_STALL_SECS: f64 = 35.0;
+const RESPONSE_STALL_SECS: f64 = 18.0;
 const WS_PING_INTERVAL_SECS: u64 = 20;
 const TOOL_EXEC_TIMEOUT_SECS: u64 = 25;
-const STUDY_TOOL_TIMEOUT_SECS: u64 = 60;
+const STUDY_TOOL_TIMEOUT_SECS: u64 = 180;
 const MONITOR_CHECK_INTERVAL_SECS: u64 = 60;
 const MAX_SESSION_AGE_SECS: u64 = 14 * 60; // Proactive clean refresh before 15m audio limit
 const MAX_LOG_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -213,6 +214,20 @@ fn spawn_audio_manager(
     audio_cmd_tx
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum ChimeKind {
+    StartAck,
+    ScreenCaptured,
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskProgress {
+    pub title: String,
+    pub stage: String,
+    pub progress: f32,
+    pub detail: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum AppEvent {
     StateChange(AppState),
@@ -226,6 +241,11 @@ pub enum AppEvent {
         detail: String,
     },
     TimerAlert(String),
+    PlayChime(ChimeKind),
+    TaskProgress(Option<TaskProgress>),
+    StudyVisual(Box<study_visual::StudyBoardData>),
+    StudyVisualStep(String),
+    CloseStudyVisual,
     Shutdown,
 }
 
@@ -747,6 +767,7 @@ async fn run_session(
             let tools_worker = tools.clone();
             let event_tx_worker = event_tx.clone();
             let confirm_rx_worker = confirm_rx.clone();
+            let playback_worker = playback_slot.clone();
             tokio::spawn(async move {
                 while let Some((calls, mut saw_untrusted)) = tool_job_rx.recv().await {
                     let mut responses = Vec::new();
@@ -755,10 +776,59 @@ async fn run_session(
                     for call in calls {
                         let args_str = call.args.to_string();
                         let args_preview = truncate_chars(&args_str, 160);
+                        tracing::info!("executing tool '{}' args={}", call.name, args_preview);
                         let _ = event_tx_worker.send(AppEvent::Log(format!(
                             "tool: {} {}",
                             call.name, args_preview
                         )));
+
+                        // Play StartAck immediately ONLY for non-screen slow calls.
+                        // For screen-capture calls, the crisp ScreenCaptured shutter chime fires
+                        // AFTER capture completes so hearing the beep means it's 100% safe to Alt+Tab!
+                        let will_capture_screen = match call.name.as_str() {
+                            "study_solve" => {
+                                let src = call
+                                    .args
+                                    .get("source")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("screen");
+                                !matches!(src.to_ascii_lowercase().as_str(), "text" | "none")
+                            }
+                            "study_board" => {
+                                let art = call
+                                    .args
+                                    .get("art_mode")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
+                                let src = call
+                                    .args
+                                    .get("source")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(if art { "screen" } else { "text" });
+                                matches!(src.to_ascii_lowercase().as_str(), "screen" | "clipboard")
+                            }
+                            "generate_document" => {
+                                let src = call
+                                    .args
+                                    .get("source")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("text");
+                                matches!(src.to_ascii_lowercase().as_str(), "screen" | "clipboard")
+                            }
+                            _ => false,
+                        };
+                        if !will_capture_screen
+                            && matches!(
+                                call.name.as_str(),
+                                "generate_document" | "study_board" | "study_solve"
+                            )
+                        {
+                            send_playback(
+                                &playback_worker,
+                                PlaybackCmd::Audio(synth_chime_pcm(ChimeKind::StartAck)),
+                            )
+                            .await;
+                        }
 
                         let decision =
                             confirm::evaluate_tool_call(&call.name, &call.args, saw_untrusted);
@@ -862,6 +932,7 @@ async fn run_session(
         let mut echo_guard = echo::EchoGuard::new();
         let mut ptt_was_active = false;
         let mut model_turn_active = false;
+        let mut tools_in_flight: usize = 0;
         let mut deferred_refresh = false;
         let mut last_sent_audio_level: f32 = -1.0;
         let session_started = Instant::now();
@@ -1078,8 +1149,10 @@ async fn run_session(
                                     t0.elapsed().as_millis()
                                 );
                             }
+                            tools_in_flight += 1;
                             let _ = event_tx.send(AppEvent::StateChange(AppState::Thinking));
                             if tool_job_tx.send((calls, saw_untrusted_in_turn)).await.is_err() {
+                                tools_in_flight = tools_in_flight.saturating_sub(1);
                                 tracing::error!("tool worker channel closed");
                             }
                         }
@@ -1091,9 +1164,12 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::GoAway { time_left } => {
-                            if model_turn_active || awaiting_response_since.is_some() {
+                            if model_turn_active
+                                || tools_in_flight > 0
+                                || awaiting_response_since.is_some()
+                            {
                                 tracing::info!(
-                                    "Gemini GoAway ({:?}) — deferring refresh until current turn finishes",
+                                    "Gemini GoAway ({:?}) — deferring refresh until current turn/tool finishes",
                                     time_left
                                 );
                                 deferred_refresh = true;
@@ -1134,6 +1210,7 @@ async fn run_session(
                 }
 
                 Some(outcome) = tool_done_rx.recv() => {
+                    tools_in_flight = tools_in_flight.saturating_sub(1);
                     saw_untrusted_in_turn |= outcome.saw_untrusted;
                     for jpeg in outcome.vision_frames {
                         if let Err(e) = session.send_image(&jpeg).await {
@@ -1202,6 +1279,10 @@ async fn run_session(
                                 tracing::error!("timer alert send: {e}");
                             }
                         }
+                        Ok(AppEvent::PlayChime(kind)) => {
+                            send_playback(&playback_slot, PlaybackCmd::Audio(synth_chime_pcm(kind)))
+                                .await;
+                        }
                         Ok(AppEvent::Shutdown) => {
                             should_shutdown = true;
                             break;
@@ -1225,7 +1306,8 @@ async fn run_session(
                     }
 
                     // Only trigger stall reconnect if we sent a turn/toolResponse and got zero reply
-                    if let Some(since) = awaiting_response_since
+                    if tools_in_flight == 0
+                        && let Some(since) = awaiting_response_since
                         && since.elapsed().as_secs_f64() > RESPONSE_STALL_SECS
                     {
                         tracing::warn!("response stall after {RESPONSE_STALL_SECS}s — reconnecting");
@@ -1234,7 +1316,10 @@ async fn run_session(
                     }
 
                     if session_started.elapsed().as_secs() >= MAX_SESSION_AGE_SECS {
-                        if model_turn_active || awaiting_response_since.is_some() {
+                        if model_turn_active
+                            || tools_in_flight > 0
+                            || awaiting_response_since.is_some()
+                        {
                             if !deferred_refresh {
                                 tracing::info!(
                                     "session reached 14m during active turn — deferring rotation until turn finishes"
@@ -1287,6 +1372,7 @@ async fn run_session(
 
         // Cancel per-session tool worker cleanly so stale jobs never leak across reconnects
         tool_worker_handle.abort();
+        let _ = event_tx.send(AppEvent::TaskProgress(None));
         drop(mic_guard);
         drop(int_guard);
         drop(cfg_guard);
@@ -1339,6 +1425,42 @@ async fn run_session(
     }
 }
 
+/// Synthesizes crisp 24kHz mono i16 PCM UI chimes:
+/// - `StartAck`: soft ascending crystal chime (E5 -> A5, 170ms) when a text study/doc task starts.
+/// - `ScreenCaptured`: bright crisp shutter double-pip (C6 -> G6, 130ms) fired the exact millisecond
+///   AFTER screen capture finishes in RAM so the user knows it's 100% safe to Alt+Tab!
+fn synth_chime_pcm(kind: ChimeKind) -> Vec<u8> {
+    let sr = RECV_SAMPLE_RATE as f32;
+    let (dur_total, split, f1, f2, amp) = match kind {
+        ChimeKind::StartAck => (0.17_f32, 0.075_f32, 659.25_f32, 880.0_f32, 0.17_f32),
+        ChimeKind::ScreenCaptured => (0.13_f32, 0.055_f32, 1046.5_f32, 1567.98_f32, 0.20_f32),
+    };
+    let total = (sr * dur_total) as usize;
+    let mut bytes = Vec::with_capacity(total * 2);
+    for i in 0..total {
+        let t = i as f32 / sr;
+        let (freq, local_t, dur) = if t < split {
+            (f1, t, split)
+        } else {
+            (f2, t - split, dur_total - split)
+        };
+        let env = (local_t / 0.008).min(1.0) * (1.0 - (local_t / dur).clamp(0.0, 1.0)).powf(1.7);
+        let wave = (std::f32::consts::TAU * freq * t).sin() * 0.74
+            + (std::f32::consts::TAU * freq * 2.0 * t).sin() * 0.16;
+        let sample = (wave * env * amp * i16::MAX as f32) as i16;
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 async fn execute_tool_isolated(
     tools: &Arc<tools::ToolRegistry>,
     name: &str,
@@ -1347,18 +1469,27 @@ async fn execute_tool_isolated(
     let t = Arc::clone(tools);
     let tool_name = name.to_string();
     let started = Instant::now();
-    let handle = tokio::spawn(async move { t.execute(&tool_name, args).await });
+    // Guarded by AbortOnDrop so timeout or session reconnect ALWAYS cancels the inner tool task
+    // and prevents zombie Save As dialogs from popping up after reconnect!
+    let mut handle = AbortOnDrop(tokio::spawn(
+        async move { t.execute(&tool_name, args).await },
+    ));
 
-    let timeout_secs = if name == "study_solve" {
-        STUDY_TOOL_TIMEOUT_SECS
-    } else {
-        TOOL_EXEC_TIMEOUT_SECS
+    let timeout_secs = match name {
+        "study_solve" | "study_board" | "generate_document" | "write_file" | "generate_qrcode" => {
+            STUDY_TOOL_TIMEOUT_SECS
+        }
+        _ => TOOL_EXEC_TIMEOUT_SECS,
     };
 
-    let result = match tokio::time::timeout(Duration::from_secs(timeout_secs), handle).await {
+    let result = match tokio::time::timeout(Duration::from_secs(timeout_secs), &mut handle.0).await
+    {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => tools::ToolResult::err(format!("tool panicked: {e}")),
-        Err(_) => tools::ToolResult::err(format!("tool '{name}' timed out after {timeout_secs}s")),
+        Err(_) => {
+            handle.0.abort();
+            tools::ToolResult::err(format!("tool '{name}' timed out after {timeout_secs}s"))
+        }
     };
 
     tracing::info!(

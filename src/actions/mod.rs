@@ -1,6 +1,7 @@
 pub mod background_monitor;
 mod browser;
 mod computer_control;
+pub mod documents;
 mod files;
 mod flight_finder;
 mod game_updater;
@@ -10,7 +11,7 @@ pub mod open_app;
 mod reminder;
 mod screen;
 mod send_message;
-mod study;
+pub mod study;
 mod system;
 mod utils;
 mod video_player;
@@ -23,12 +24,14 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
 pub fn register_all(registry: &mut ToolRegistry, event_tx: broadcast::Sender<AppEvent>) {
-    screen::register(registry);
+    screen::register(registry, event_tx.clone());
     browser::register(registry);
     computer_control::register(registry);
     files::register(registry);
     inline::register(registry, event_tx.clone());
     study::register(registry, event_tx.clone());
+    documents::register(registry, event_tx.clone());
+    crate::study_visual::register(registry, event_tx.clone());
     open_app::register(registry);
     reminder::register(registry);
     system::register(registry);

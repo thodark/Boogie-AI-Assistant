@@ -21,11 +21,11 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Liên hệ",
       "nav.cta": "Tải ngay",
-      "hero.badge": "Mới v0.3.0: Study Brain giải mọi môn (Cấp 1 → Đại học) chuẩn xác cao",
+      "hero.badge": "Mới v0.4.0: Bảng Study Visual + Art Study & Xuất PDF/Word/Excel (chọn chỗ lưu)",
       "hero.title": 'Trợ lý AI giọng nói <span class="gradient-text">kiểu JARVIS</span> ngay trên Windows của bạn.',
-      "hero.subtitle": "Tải về là chạy ngay — không cần cài đặt phức tạp, không cần biết code. Nói chuyện tự nhiên bằng tiếng Việt hoặc tiếng Anh với phản hồi ~0.58 giây, gia sư AI giải mọi môn từ Cấp 1 đến Đại học từ màn hình sắc nét, điều khiển 44 tác vụ Windows và nhớ những gì bạn kể.",
+      "hero.subtitle": "Tải về là chạy ngay — không cần cài đặt phức tạp, không cần biết code. Nói chuyện tự nhiên tiếng Việt / Anh với phản hồi ~0.58 giây, bảng dạy học tương tác Study Visual (đồ thị, sơ đồ, Art Study), xuất đề cương PDF/Word/Excel có hộp thoại chọn chỗ lưu, điều khiển 46 tác vụ Windows và trí nhớ thông minh.",
       "hero.downloadZip": "Tải cho Windows (ZIP — Khuyên dùng)",
-      "hero.downloadExe": "Bản Portable 1 file (boogie.exe)",
+      "hero.downloadExe": "Bản Portable 1 file (Boogie-v0.4.0.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
       "hero.trust2": "Không cần Rust, Cargo hay Python",
       "hero.trust3": "Chạy Portable không cần cài",
@@ -40,10 +40,10 @@
       "download.desc": "Tất cả bản phát hành đều được biên dịch tự động trực tiếp từ mã nguồn công khai trên GitHub Actions, không chứa phần mềm quảng cáo.",
       "download.recommended": "Khuyên dùng",
       "download.portable": "1 File duy nhất",
-      "download.zipDesc": "Gói Portable đầy đủ gồm <code>boogie.exe</code>, mẫu cấu hình, hướng dẫn và giấy phép MIT. Chỉ cần giải nén vào một thư mục cố định (như <code>D:\\Boogie\\</code>) và mở chạy.",
-      "download.exeDesc": "Bản chạy thẳng 1 tệp duy nhất, không cần giải nén. Tự động tạo thư mục <code>config/</code> bên cạnh file để lưu cấu hình, API key và bộ nhớ trên máy bạn.",
+      "download.zipDesc": "Gói Portable đầy đủ gồm file <code>.exe</code> kèm số phiên bản, mẫu cấu hình, hướng dẫn và giấy phép MIT. Xóa thư mục bản cũ tải bản mới vẫn giữ nguyên 100% API key và trí nhớ!",
+      "download.exeDesc": "Bản chạy thẳng 1 tệp duy nhất có kèm số phiên bản trên tên file (vd: <code>Boogie-v0.4.0.exe</code>). API key, cấu hình và bộ nhớ lưu bền vững trong <code>%APPDATA%\\Boogie\\</code> nên đổi bản mới không lo mất dữ liệu.",
       "download.zipBtn": "Tải gói ZIP",
-      "download.exeBtn": "Tải boogie.exe",
+      "download.exeBtn": "Tải Boogie-v0.4.0.exe",
       "sha.title": "Kiểm tra mã toàn vẹn SHA-256",
       "sha.desc": "Đối chiếu mã SHA-256 sau khi tải để chắc chắn 100% file nguyên bản từ GitHub Releases và không bị chỉnh sửa.",
       "sha.fileCol": 'Tệp phát hành (<span id="sha-release-tag">latest</span>)',
@@ -80,8 +80,8 @@
       "tips.t4Desc": "Từ v0.2.0, Boogie đổi giọng điệu tự nhiên theo ngữ cảnh: làm việc gọn gàng, nói chuyện phiếm biết tung hứng dí dỏm, và lắng nghe ấm áp khi bạn tâm sự.",
       "sec.eyebrow": "AN TOÀN & QUYỀN RIÊNG TƯ",
       "sec.title": "Bạn luôn nắm quyền kiểm soát",
-      "sec.c1Title": "Hỏi xác nhận trước thao tác nguy hiểm",
-      "sec.c1Desc": "Xóa file, ghi file, chạy lệnh hệ thống thay đổi máy, tắt/khởi động lại PC, tắt ứng dụng hay gửi tin nhắn đều hiện bảng <strong>Approve / Deny</strong> trên màn hình — Boogie không bao giờ tự ý làm lén.",
+      "sec.c1Title": "Xác nhận thao tác nguy hiểm & Bắt buộc chọn chỗ lưu",
+      "sec.c1Desc": "Mọi thao tác lưu file (PDF, Word, Excel, văn bản, QR) <strong>luôn mở bảng Save As của Windows</strong> để bạn tự chọn đúng thư mục &amp; tên file. Xóa/di chuyển file, chạy lệnh hệ thống, tắt PC hay gửi tin nhắn luôn hiện bảng <strong>Approve / Deny</strong>.",
       "sec.c2Title": "API Key & Ký ức lưu 100% trên máy bạn",
       "sec.c2Desc": "Không có máy chủ trung gian. API key (<code>api_keys.json</code>) và bộ nhớ (<code>memory.json</code>) nằm hoàn toàn trong thư mục máy tính của bạn và chỉ kết nối thẳng tới Google Gemini.",
       "sec.c3Title": "Chống Prompt Injection & Ghi nhật ký Audit",
@@ -121,11 +121,11 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Contact",
       "nav.cta": "Download",
-      "hero.badge": "New in v0.3.0: Deep Study Brain for All Subjects (Grade 1 to University)",
+      "hero.badge": "New in v0.4.0: Study Visual Board, Art Study & PDF/Word/Excel Studio",
       "hero.title": 'A <span class="gradient-text">JARVIS-style</span> real-time voice AI assistant for Windows.',
-      "hero.subtitle": "Download and run instantly — no installer, no Rust or Python, no coding required. Talk naturally in English or Vietnamese with ~0.58s response speed, a lossless-PNG Deep Study Brain for every subject from elementary to university, 44 Windows tools, and smart memory.",
+      "hero.subtitle": "Download and run instantly — no installer, no Rust or Python, no coding required. Talk naturally in English or Vietnamese (~0.58s TTFB), open an interactive split-screen Study Visual & Art Study board, export PDF/Word/Excel study guides with a mandatory Windows Save As picker, and automate 46 Windows tools.",
       "hero.downloadZip": "Download for Windows (ZIP — Recommended)",
-      "hero.downloadExe": "Portable Single File (boogie.exe)",
+      "hero.downloadExe": "Portable Single File (Boogie-v0.4.0.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
       "hero.trust2": "No Rust, Cargo, or Python needed",
       "hero.trust3": "Portable — zero installation",
@@ -140,10 +140,10 @@
       "download.desc": "Every release binary is automatically built from public source code on GitHub Actions — clean, portable, and ad-free.",
       "download.recommended": "Recommended",
       "download.portable": "Single File",
-      "download.zipDesc": "Complete portable bundle with <code>boogie.exe</code>, example config, README, and MIT License. Extract into any folder (e.g. <code>D:\\Boogie\\</code>) and double-click to run.",
-      "download.exeDesc": "Standalone single executable with zero extraction needed. Automatically creates a local <code>config/</code> folder next to the file for your settings and memory.",
+      "download.zipDesc": "Complete bundle with the versioned <code>.exe</code>, example config, README, and MIT License. Delete old folders anytime when upgrading — your API key and memories stay safe!",
+      "download.exeDesc": "Standalone single executable clearly labeled with its version (e.g. <code>Boogie-v0.4.0.exe</code>). API key, settings, and memories are stored persistently in <code>%APPDATA%\\Boogie\\</code> across upgrades.",
       "download.zipBtn": "Download ZIP Bundle",
-      "download.exeBtn": "Download boogie.exe",
+      "download.exeBtn": "Download Boogie-v0.4.0.exe",
       "sha.title": "Verify Release Integrity (SHA-256)",
       "sha.desc": "Compare your downloaded file's SHA-256 hash to guarantee it came untouched from official GitHub Releases.",
       "sha.fileCol": 'Release file (<span id="sha-release-tag">latest</span>)',
@@ -180,8 +180,8 @@
       "tips.t4Desc": "As of v0.2.0, Boogie shifts tone naturally — crisp and fast on tasks, playful and witty in casual chats, and genuinely warm when you just want to talk.",
       "sec.eyebrow": "SECURITY & PRIVACY",
       "sec.title": "You always stay in control",
-      "sec.c1Title": "On-screen approval for sensitive actions",
-      "sec.c1Desc": "Deleting or writing files, mutating shell commands, restarting/shutting down your PC, killing apps, or sending messages always pop up an <strong>Approve / Deny</strong> card first.",
+      "sec.c1Title": "Approval gates & Mandatory Save As Picker",
+      "sec.c1Desc": "Every file save (PDF, Word, Excel, text, QR) <strong>always opens a native Windows Save As dialog</strong> so you pick the exact folder &amp; filename. Deleting/moving files, mutating shell commands, shutting down PC, or sending messages always ask for <strong>Approve / Deny</strong>.",
       "sec.c2Title": "API Key & Memory stay 100% local",
       "sec.c2Desc": "Zero third-party relay servers. Your API key (<code>api_keys.json</code>) and memory (<code>memory.json</code>) stay on your PC and connect straight to Google's Gemini endpoint.",
       "sec.c3Title": "Prompt Injection Defense & Audit Log",
@@ -253,6 +253,60 @@
           "Don't spoil the final answer — give me hints for this calculus problem",
         ],
         tip: "Pro tip: Snip just the exercise with Win+Shift+S and say \"solve the clipboard image\" for near-perfect OCR accuracy. Switch Pro / Flash anytime in ⚙ Settings → Study Brain.",
+      },
+    },
+    {
+      cat: "study",
+      icon: "🎨",
+      confirm: false,
+      vi: {
+        title: "Study Visual — Bảng dạy học tương tác & Art Study",
+        desc: "Chia đôi màn hình ngay trong Boogie (bật/tắt tùy ý trong ⚙ Settings): giảng bài từng bước (Prev/Next), vẽ đồ thị 2D Toán/Lý, sơ đồ tư duy/flowchart, bảng so sánh, code highlight, phân tích tranh Mỹ thuật (lưới 1/3, Value Study trắng đen, trích bảng màu HEX thật & Live Sketch Replay phác nét động) và nút xuất PDF/Word 1 click!",
+        examples: [
+          "Vào chế độ dạy học, giảng hàm bậc 2 y = x^2 - 2x - 3 và vẽ đồ thị lên bảng",
+          "Mở bảng Study Visual phân tích bố cục, sáng tối, màu sắc và cách vẽ bức tranh trên màn hình",
+          "Vẽ sơ đồ tư duy các thì trong tiếng Anh lên bảng giúp mình",
+          "Chuyển sang bước tiếp theo trên bảng đi Boogie",
+        ],
+        tip: "Mẹo: Bạn có thể bật/tắt Study Visual bất cứ lúc nào trong ⚙ Settings → Study Visual (Interactive Teaching Board).",
+      },
+      en: {
+        title: "Study Visual — Interactive Teaching & Art Study Board",
+        desc: "Smooth split-screen teaching board inside Boogie (toggleable in ⚙ Settings): step-by-step reveal, 2D Math/Physics graphs, mindmaps/flowcharts, tables, highlighted code, Art Study Studio (Rule of Thirds, B&W Value Study, real pixel HEX palette, animated Live Sketch Replay), plus 1-click PDF/Word export!",
+        examples: [
+          "Enter teaching mode and plot y = x^2 - 2x - 3 on the Study Visual board",
+          "Analyze the composition, values, color palette, and sketching steps for the painting on my screen",
+          "Draw a mindmap of English verb tenses on the visual board",
+          "Reveal the next step on the board",
+        ],
+        tip: "Tip: Toggle Study Visual on or off anytime in ⚙ Settings → Study Visual (Interactive Teaching Board).",
+      },
+    },
+    {
+      cat: "study",
+      icon: "📄",
+      confirm: false,
+      vi: {
+        title: "Document Studio — Xuất đề cương PDF / Word / Excel (Chọn chỗ lưu)",
+        desc: "Tự soạn đề cương ôn thi, đề kiểm tra có đáp án tách trang, tài liệu tổng hợp hoặc bảng tính Excel có công thức thật (=SUM, =AVERAGE) chuẩn tiếng Việt UTF-8 — không cần cài Office. Luôn hiện hộp thoại Save As của Windows để bạn tự chọn thư mục & tên file (không hỗ trợ PPTX).",
+        examples: [
+          "Tạo đề cương ôn thi Toán 12 chương Khảo sát hàm số gồm 10 câu có đáp án xuất ra PDF",
+          "Làm file Word tổng hợp công thức Vật lý 11 kèm bảng so sánh giúp mình",
+          "Tạo file Excel quản lý chi tiêu sinh viên theo tháng có sẵn công thức tính tổng",
+          "Đọc slide trên màn hình rồi tạo đề cương ôn tập file Word giúp mình",
+        ],
+        tip: "An toàn tuyệt đối: Khi tạo xong nội dung, bảng Save As chuẩn Windows sẽ hiện ra để bạn chọn chỗ lưu — bấm Cancel sẽ không ghi bất kỳ file nào.",
+      },
+      en: {
+        title: "Document Studio — Export PDF / Word / Excel (Mandatory Save As)",
+        desc: "Generates study guides, practice exams with separate answer keys, lecture summaries, or formula-driven Excel workbooks (=SUM, =AVERAGE) in crisp UTF-8 — zero Office needed. Always opens a native Windows Save As dialog so you pick the exact folder & filename (PPTX excluded).",
+        examples: [
+          "Create a 10-question Calculus 1 midterm study guide with answers as a PDF",
+          "Generate a Word document summarizing Physics formulas with a comparison table",
+          "Build a monthly student budget spreadsheet in Excel with SUM formulas",
+          "Read the lecture slide on my screen and turn it into a Word study guide",
+        ],
+        tip: "Zero accidental overwrites: a native Windows Save As dialog always pops up so you choose exactly where to save (or Cancel cleanly).",
       },
     },
     {
@@ -474,6 +528,24 @@
   ];
 
   const CHANGELOG = {
+    v040: {
+      vi: [
+        "<strong>Lưu dữ liệu bền vững qua bản cập nhật (<code>%APPDATA%\\Boogie\\</code>) &amp; File <code>.exe</code> kèm phiên bản:</strong> Xóa hẳn thư mục Boogie cũ rồi tải phiên bản mới (<code>Boogie-v0.4.0.exe</code>) về mở lên vẫn giữ nguyên 100% Gemini API key, cài đặt và toàn bộ trí nhớ (tự động di chuyển dữ liệu cũ từ thư mục <code>config/</code> sang <code>%APPDATA%\\Boogie\\</code> ở lần mở đầu).",
+        "<strong>Bắt buộc hiện hộp thoại Save As khi lưu file (<code>rfd</code>):</strong> Mọi thao tác lưu file người dùng (tạo PDF/Word/Excel, ghi file <code>write_file</code>, xuất mã QR, xuất từ Study Visual) luôn mở bảng chọn thư mục &amp; tên file chuẩn Windows — không bao giờ lưu ngầm sai chỗ, chặn ghi vào thư mục hệ thống Windows.",
+        "<strong>Document Studio (<code>generate_document</code> — PDF, Word <code>.docx</code>, Excel <code>.xlsx</code>):</strong> Tự soạn đề cương ôn thi, đề luyện tập có trang đáp án riêng, tài liệu tổng hợp và bảng tính Excel có công thức thật (<code>=SUM</code>, <code>=AVERAGE</code>, tự căn cột) chuẩn tiếng Việt UTF-8 — không cần cài Office (không hỗ trợ <code>.pptx</code>).",
+        "<strong>Bảng dạy học tương tác Study Visual (<code>study_board</code> + nút bật/tắt trong Settings):</strong> Thu gọn quả cầu 3D sang trái để mở bảng giảng bài chia đôi màn hình: đi từng bước (Prev/Next/Show All bằng chuột hoặc giọng nói), vẽ đồ thị 2D Toán/Lý, sơ đồ tư duy/flowchart/timeline, bảng so sánh, code highlight và nút xuất thẳng ra PDF / Word.",
+        "<strong>Art Study Studio cho môn Mỹ thuật:</strong> Phân tích tranh trực tiếp trên màn hình hoặc ảnh cắt <code>Win+Shift+S</code> với lưới Quy tắc 1/3, đường chéo, chế độ <strong>Value Study (B&amp;W)</strong>, trích xuất <strong>bảng màu HEX thật từ pixel ảnh</strong> (bấm để copy) và <strong>Live Sketch Replay</strong> mô phỏng phác nét từng bước tới lên màu (chạy thuần Rust ngay cả khi hết quota REST).",
+        "<strong>Thanh tiến trình trực tiếp, tiếng bíp chụp màn hình tức thì (~25ms) &amp; Chống hết quota Free Tier:</strong> Hiển thị thẻ Progress Bar động (bước, %, đồng hồ đếm giây), phát tiếng bíp sắc ngay sau khi chụp màn hình xong để bạn <code>Alt+Tab</code> liền, nâng cấp chụp màn hình siêu nhanh <code>1920px Q95 JPEG</code>, tự mở bảng Study Visual tức thì (&lt;50ms) không tốn quota REST và tự dự phòng sang <strong>Direct Live Vision (~1.2s)</strong>.",
+      ],
+      en: [
+        "<strong>Upgrade-Safe Persistent Storage (<code>%APPDATA%\\Boogie\\</code>) &amp; Versioned <code>.exe</code>:</strong> Deleting an old Boogie folder and opening a newer release (<code>Boogie-v0.4.0.exe</code>) keeps your Gemini API key, settings, and full long-term memory intact (automatically migrates legacy <code>config/</code> files on first launch).",
+        "<strong>Mandatory Native Windows Save As Picker (<code>rfd</code>):</strong> Every user file save (<code>generate_document</code>, <code>write_file</code>, <code>generate_qrcode</code>, and Study Visual exports) now always opens a native Windows Save As dialog so you choose the exact folder &amp; filename (blocks protected OS folders &amp; logs to audit log).",
+        "<strong>Document Studio (<code>generate_document</code> — PDF, Word <code>.docx</code>, Excel <code>.xlsx</code>):</strong> Creates study outlines, practice exams with separate answer keys, structured notes, and real-formula Excel workbooks (<code>=SUM</code>, <code>=AVERAGE</code>, autofit, frozen headers) with full UTF-8 &amp; math symbols — zero Office install required (<code>.pptx</code> intentionally excluded).",
+        "<strong>Toggleable Split-Screen <code>Study Visual</code> Teaching Board:</strong> Smoothly glides the 3D orb left and opens a frosted-glass board with Sticky Teaching Mode (auto-updates on new questions), instant &lt;50ms zero-quota direct rendering, step-by-step reveal (click or voice), 2D Math/Physics curve &amp; vector graphs, flowcharts/mindmaps/timelines, tables, code highlighting, 1-click PDF/Word export, and a Settings toggle.",
+        "<strong>Art Study Studio Overlay:</strong> Captures reference paintings from screen or <code>Win+Shift+S</code> clipboard with Rule-of-Thirds &amp; diagonal guides, AI focal markers, grayscale <strong>Value Study (B&amp;W)</strong>, pixel-extracted <strong>Dominant HEX Palette</strong> swatches (click to copy), and animated <strong>Live Sketch Replay</strong> (pure Rust — works even at zero REST quota).",
+        "<strong>Live Progress Card, Instant ~25ms Post-Capture Shutter Beep &amp; Free-Tier Quota Immunity:</strong> Added a frosted-glass animated progress card, fired the shutter beep immediately after raw screen capture so you can <code>Alt+Tab</code> right away, switched full-screen capture to fast crisp <code>1920px Q95 JPEG</code>, added a multi-model REST cascade with automatic <strong>Direct Live Vision</strong> fallback, plus a ~1.2s <strong>Flash Direct Vision</strong> mode in Settings.",
+      ],
+    },
     v030: {
       vi: [
         "<strong>Study Brain (<code>study_solve</code>) — Hỗ trợ mọi môn từ Cấp 1 → Đại học:</strong> Tách riêng bộ não học tập suy luận sâu dùng ảnh <strong>PNG lossless độ phân giải gốc (≤2560px)</strong> + <code>MEDIA_RESOLUTION_HIGH</code> + <code>thinkingBudget: 8192</code> trên <code>gemini-2.5-pro</code> (tự động dự phòng sang <code>gemini-2.5-flash</code> nếu Pro hết quota).",
@@ -539,6 +611,8 @@
       {
         q: "Dữ liệu hội thoại, API key và bộ nhớ của mình được lưu ở đâu?",
         a: "Tất cả đều nằm cục bộ trong thư mục <code>config/</code> nằm ngay cạnh file <code>boogie.exe</code> (gồm <code>api_keys.json</code>, <code>memory.json</code>, <code>long_term.json</code> và <code>boogie.log</code>). Nếu muốn chuyển sang máy khác, chỉ cần copy thư mục Boogie; nếu muốn xóa sạch trí nhớ, mở ⚙ Settings → tab <strong>Memory</strong> → <strong>Clear All Memory</strong>.",
+        q: "Xóa thư mục Boogie cũ để tải phiên bản mới có bị mất API key và trí nhớ không?",
+        a: "<strong>Không bao giờ mất!</strong> Từ bản <strong>v0.4.0</strong>, Boogie lưu toàn bộ API key (<code>api_keys.json</code>), cấu hình và trí nhớ (<code>memory.json</code>, <code>long_term.json</code>) trong thư mục bền vững của Windows tại <code>%APPDATA%\\Boogie\\</code> (tự động chuyển dữ liệu từ bản cũ nếu có). Bạn xóa hẳn thư mục Boogie cũ rồi mở file <code>Boogie-v0.4.0.exe</code> mới lên là dùng tiếp ngay. (Nếu muốn xóa sạch dữ liệu, mở ⚙ Settings → tab <strong>Memory</strong> → <strong>Clear All Memory</strong>).",
       },
     ],
     en: [
@@ -561,6 +635,8 @@
       {
         q: "Where are my API key, settings, and memories stored?",
         a: "Everything is stored locally inside the <code>config/</code> folder next to <code>boogie.exe</code> (<code>api_keys.json</code>, <code>memory.json</code>, <code>long_term.json</code>, and <code>boogie.log</code>). You can inspect or wipe stored memories anytime via ⚙ Settings → <strong>Memory</strong> tab.",
+        q: "If I delete my old Boogie folder and download a newer version, will I lose my API key and memories?",
+        a: "<strong>No — everything stays intact!</strong> Starting in <strong>v0.4.0</strong>, Boogie stores your API key (<code>api_keys.json</code>), settings, and long-term memories (<code>memory.json</code>, <code>long_term.json</code>) persistently in <code>%APPDATA%\\Boogie\\</code> (and automatically migrates legacy <code>config/</code> files on first run). You can safely delete old folders and launch the new versioned <code>Boogie-v0.4.0.exe</code> right away.",
       },
     ],
   };
@@ -660,9 +736,8 @@
     });
 
     if (filtered.length === 0) {
-      grid.innerHTML = `<div class="glass-card" style="grid-column:1/-1;text-align:center;color:var(--text-soft)">${
-        currentLang === "vi" ? "Không tìm thấy tính năng phù hợp — thử từ khóa khác nhé." : "No matching commands found — try another keyword."
-      }</div>`;
+      grid.innerHTML = `<div class="glass-card" style="grid-column:1/-1;text-align:center;color:var(--text-soft)">${currentLang === "vi" ? "Không tìm thấy tính năng phù hợp — thử từ khóa khác nhé." : "No matching commands found — try another keyword."
+        }</div>`;
       return;
     }
 
@@ -681,14 +756,14 @@
           <p class="cmd-card-desc">${d.desc}</p>
           <div class="cmd-examples">
             ${d.examples
-              .map(
-                (ex) => `
+            .map(
+              (ex) => `
               <button type="button" class="cmd-quote" data-quote="${ex.replace(/"/g, "&quot;")}">
                 <span>“${ex}”</span>
                 <span class="quote-copy">${copyLabel}</span>
               </button>`
-              )
-              .join("")}
+            )
+            .join("")}
           </div>
           <p class="cmd-tip">${d.tip}</p>
         </article>`;
@@ -701,9 +776,11 @@
   }
 
   function renderChangelog() {
+    const v040 = document.getElementById("cl-v040");
     const v030 = document.getElementById("cl-v030");
     const v020 = document.getElementById("cl-v020");
     const v010 = document.getElementById("cl-v010");
+    if (v040) v040.innerHTML = CHANGELOG.v040[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v030) v030.innerHTML = CHANGELOG.v030[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v020) v020.innerHTML = CHANGELOG.v020[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v010) v010.innerHTML = CHANGELOG.v010[currentLang].map((li) => `<li>${li}</li>`).join("");
@@ -763,7 +840,7 @@
     syncReleaseTagText();
   }
 
-  let latestTagText = "v0.3.0";
+  let latestTagText = "v0.4.0";
   function syncReleaseTagText() {
     const shaTag = document.getElementById("sha-release-tag");
     if (shaTag) shaTag.textContent = latestTagText;
@@ -780,7 +857,7 @@
       });
       if (!res.ok) throw new Error("release fetch failed");
       const rel = await res.json();
-      const tag = rel.tag_name || "v0.2.0";
+      const tag = rel.tag_name || "v0.4.0";
       latestTagText = tag;
 
       ["nav-version", "hero-release-tag", "card-zip-version", "card-exe-version", "sha-release-tag"].forEach((id) => {
@@ -789,12 +866,22 @@
       });
 
       const assets = Array.isArray(rel.assets) ? rel.assets : [];
-      const zip = assets.find((a) => a.name === "Boogie-Windows-x64.zip");
-      const exe = assets.find((a) => a.name === "boogie.exe");
+      const zip =
+        assets.find((a) => /^Boogie-v.*-Windows-x64\.zip$/i.test(a.name)) ||
+        assets.find((a) => a.name === "Boogie-Windows-x64.zip");
+      const exe =
+        assets.find((a) => /^Boogie-v.*\.exe$/i.test(a.name)) ||
+        assets.find((a) => a.name === "boogie.exe");
       const sha = assets.find((a) => a.name === "SHA256SUMS.txt");
 
       if (zip) {
         const sz = formatMB(zip.size);
+        const zipNameEl = document.getElementById("card-zip-name");
+        const shaZipNameEl = document.getElementById("sha-zip-name");
+        const psCmdEl = document.getElementById("ps-verify-cmd");
+        if (zipNameEl) zipNameEl.textContent = zip.name;
+        if (shaZipNameEl) shaZipNameEl.textContent = zip.name;
+        if (psCmdEl) psCmdEl.textContent = `Get-FileHash .\\${zip.name} -Algorithm SHA256`;
         document.getElementById("hero-zip-size").textContent = sz;
         document.getElementById("card-zip-size").textContent = sz;
         document.getElementById("hero-zip-btn").href = zip.browser_download_url;
@@ -805,6 +892,10 @@
       }
       if (exe) {
         const sz = formatMB(exe.size);
+        const exeNameEl = document.getElementById("card-exe-name");
+        const shaExeNameEl = document.getElementById("sha-exe-name");
+        if (exeNameEl) exeNameEl.textContent = exe.name;
+        if (shaExeNameEl) shaExeNameEl.textContent = exe.name;
         document.getElementById("hero-exe-size").textContent = sz;
         document.getElementById("card-exe-size").textContent = sz;
         document.getElementById("hero-exe-btn").href = exe.browser_download_url;

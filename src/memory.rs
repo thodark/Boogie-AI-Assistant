@@ -977,11 +977,13 @@ async fn call_gemini_consolidator(
     turns: &[String],
     language: &str,
 ) -> Result<ConsolidationPayload, String> {
-    let model = cfg.memory_model().trim_start_matches("models/");
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={}",
-        cfg.api_key()
-    );
+    let primary_model = cfg.memory_model().trim_start_matches("models/");
+    let mut candidate_models = Vec::new();
+    for m in [primary_model, "gemini-3.1-flash-lite", "gemini-2.5-flash"] {
+        if !m.is_empty() && m != "gemini-2.5-flash-lite" && !candidate_models.contains(&m) {
+            candidate_models.push(m);
+        }
+    }
 
     let existing = load_memory();
     let existing_keys: Vec<String> = sorted_rows(&existing)
@@ -1034,41 +1036,69 @@ async fn call_gemini_consolidator(
         transcript
     );
 
-    let body = serde_json::json!({
-        "contents": [{ "role": "user", "parts": [{ "text": prompt }] }],
-        "generationConfig": {
+    let mut last_err = String::from("no model attempted");
+    for model in candidate_models {
+        let mut gen_cfg = serde_json::json!({
             "temperature": 0.2,
             "maxOutputTokens": 700,
             "responseMimeType": "application/json"
+        });
+        if model.contains("2.5") || model.contains("3.") || model.contains("3-") {
+            gen_cfg["thinkingConfig"] = serde_json::json!({ "thinkingBudget": 0 });
         }
-    });
+        let body = serde_json::json!({
+            "contents": [{ "role": "user", "parts": [{ "text": prompt }] }],
+            "generationConfig": gen_cfg
+        });
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        );
+        let resp = match http_client()
+            .post(&url)
+            .header("x-goog-api-key", cfg.api_key())
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let kind = if e.is_timeout() {
+                    "timeout"
+                } else {
+                    "network error"
+                };
+                last_err = format!("{model}: {kind}");
+                continue;
+            }
+        };
 
-    let resp = http_client()
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("http error: {e}"))?;
+        let status = resp.status();
+        if status.as_u16() == 404 || status.as_u16() == 429 {
+            last_err = format!("{model}: HTTP {status}");
+            continue;
+        }
+        if !status.is_success() {
+            return Err(format!("{model}: HTTP {status}"));
+        }
 
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
+        let json: serde_json::Value = resp.json().await.map_err(|e| format!("json decode: {e}"))?;
+        let raw_text = json
+            .pointer("/candidates/0/content/parts/0/text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing candidate text".to_string())?;
+
+        let cleaned = raw_text
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        return serde_json::from_str::<ConsolidationPayload>(cleaned)
+            .map_err(|e| format!("consolidation json parse: {e}"));
     }
 
-    let json: serde_json::Value = resp.json().await.map_err(|e| format!("json decode: {e}"))?;
-    let raw_text = json
-        .pointer("/candidates/0/content/parts/0/text")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing candidate text".to_string())?;
-
-    let cleaned = raw_text
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-
-    serde_json::from_str::<ConsolidationPayload>(cleaned)
-        .map_err(|e| format!("consolidation json parse: {e}"))
+    Err(last_err)
 }
 
 #[cfg(test)]

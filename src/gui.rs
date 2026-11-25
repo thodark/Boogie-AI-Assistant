@@ -77,6 +77,7 @@ struct SetupForm {
     proactive_audio: bool,
     auto_memory_consolidation: bool,
     study_brain: StudyBrainMode,
+    study_visual_enabled: bool,
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
     memory_filter: String,
@@ -113,6 +114,7 @@ impl SetupForm {
             proactive_audio: true,
             auto_memory_consolidation: true,
             study_brain: StudyBrainMode::Auto,
+            study_visual_enabled: true,
             available_inputs,
             available_outputs,
             memory_filter: String::new(),
@@ -149,6 +151,7 @@ impl SetupForm {
             proactive_audio: base.proactive_audio(),
             auto_memory_consolidation: base.auto_memory_consolidation(),
             study_brain: base.study_brain_mode(),
+            study_visual_enabled: base.study_visual_enabled(),
             available_inputs,
             available_outputs,
             memory_filter: String::new(),
@@ -217,6 +220,9 @@ pub struct BoogieGui {
     click_pulse: f32,
     drawer_open: bool,
     drawer_anim: f32,
+    study_visual_enabled: bool,
+    study_board: Option<crate::study_visual::StudyBoardState>,
+    board_anim: f32,
     spec_bars: [f32; NUM_SPEC_BARS],
 
     // Graphics tier & color theme (with smooth live-morphing shader colors)
@@ -241,6 +247,9 @@ pub struct BoogieGui {
     ptt_holding: bool,
     confirm_pending: Option<ConfirmDisplay>,
     banner_error: Option<String>,
+    task_progress: Option<crate::TaskProgress>,
+    smooth_progress: f32,
+    task_started_at: f64,
     setup_form: Option<SetupForm>,
     shutdown_requested: bool,
     scroll_to_bottom: bool,
@@ -326,6 +335,11 @@ impl BoogieGui {
             click_pulse: 0.0,
             drawer_open: false,
             drawer_anim: 0.0,
+            study_visual_enabled: initial_cfg
+                .as_ref()
+                .is_none_or(ApiConfig::study_visual_enabled),
+            study_board: None,
+            board_anim: 0.0,
             spec_bars: [0.0; NUM_SPEC_BARS],
 
             graphics_quality: initial_quality,
@@ -349,6 +363,9 @@ impl BoogieGui {
             ptt_holding: false,
             confirm_pending: None,
             banner_error: None,
+            task_progress: None,
+            smooth_progress: 0.0,
+            task_started_at: 0.0,
             setup_form,
             shutdown_requested: false,
             scroll_to_bottom: false,
@@ -402,6 +419,39 @@ impl BoogieGui {
                     }
                     AppEvent::TimerAlert(_) => {
                         self.click_pulse = 1.0;
+                    }
+                    AppEvent::PlayChime(_) => {
+                        self.click_pulse = 0.6;
+                    }
+                    AppEvent::TaskProgress(progress) => match progress {
+                        Some(tp) => {
+                            if self.task_progress.is_none() {
+                                self.task_started_at = self.egui_time;
+                                self.smooth_progress = (tp.progress * 0.45).clamp(0.05, 0.30);
+                                self.click_pulse = 0.7;
+                            }
+                            self.task_progress = Some(tp);
+                        }
+                        None => {
+                            self.task_progress = None;
+                            self.smooth_progress = 0.0;
+                        }
+                    },
+                    AppEvent::StudyVisual(board) => {
+                        if self.study_visual_enabled {
+                            self.study_board =
+                                Some(crate::study_visual::StudyBoardState::new(*board));
+                            self.drawer_open = false;
+                            self.click_pulse = 0.85;
+                        }
+                    }
+                    AppEvent::StudyVisualStep(cmd) => {
+                        if let Some(board) = &mut self.study_board {
+                            board.apply_step_command(&cmd);
+                        }
+                    }
+                    AppEvent::CloseStudyVisual => {
+                        self.study_board = None;
                     }
                     AppEvent::Shutdown => {
                         self.shutdown_requested = true;
@@ -593,6 +643,25 @@ impl BoogieGui {
             9.5,
             dt,
         );
+        let board_active = self.study_visual_enabled && self.study_board.is_some();
+        self.board_anim = exp_lerp(
+            self.board_anim,
+            if board_active { 1.0 } else { 0.0 },
+            7.5,
+            dt,
+        );
+        if let Some(tp) = &self.task_progress {
+            let target = tp.progress.clamp(0.05, 1.0);
+            if self.smooth_progress < target {
+                self.smooth_progress = exp_lerp(self.smooth_progress, target, 4.5, dt);
+            } else {
+                // Gentle creep while AI / Save As is working so progress bar feels alive
+                let ceiling = (target + 0.24).min(0.92);
+                if self.smooth_progress < ceiling {
+                    self.smooth_progress = (self.smooth_progress + 0.022 * dt).min(ceiling);
+                }
+            }
+        }
         self.click_pulse = exp_lerp(self.click_pulse, 0.0, 4.2, dt);
 
         // Smooth mouse parallax normalized to [-1, 1]
@@ -714,14 +783,26 @@ impl BoogieGui {
     }
 
     fn paint_orb_backdrop(&self, ui: &mut egui::Ui, rect: Rect) {
-        // Center Y in OpenGL bottom-up normalized coordinates [0..1]
-        // Shifts gently upward when the transcript drawer slides open
-        let center_y = 0.58 + self.drawer_anim * 0.16;
-        let orb_scale = (0.43 - self.drawer_anim * 0.11).clamp(0.24, 0.48);
+        // Center in OpenGL bottom-up normalized coordinates [0..1]
+        // Shifts smoothly left into split-screen when Study Visual is open, or up when drawer opens
+        let wide_split = rect.width() >= 760.0;
+        let center_x = if wide_split {
+            0.5 - self.board_anim * 0.31
+        } else {
+            0.5
+        };
+        let center_y = 0.58
+            + self.drawer_anim * 0.16
+            + if !wide_split {
+                self.board_anim * 0.22
+            } else {
+                0.0
+            };
+        let orb_scale = (0.43 - self.drawer_anim * 0.11 - self.board_anim * 0.14).clamp(0.20, 0.48);
 
         let uniforms = OrbUniforms {
             time: self.egui_time as f32,
-            orb_center: [0.5, center_y],
+            orb_center: [center_x, center_y],
             orb_scale,
             audio: self.smooth_audio,
             openness: self.smooth_openness,
@@ -759,7 +840,7 @@ impl BoogieGui {
             });
         } else {
             // Safe 2D fallback (using proper unmultiplied alpha)
-            self.paint_fallback_2d_orb(ui.painter(), rect, center_y, orb_scale);
+            self.paint_fallback_2d_orb(ui.painter(), rect, center_x, center_y, orb_scale);
         }
     }
 
@@ -767,13 +848,14 @@ impl BoogieGui {
         &self,
         painter: &egui::Painter,
         rect: Rect,
+        center_x_gl: f32,
         center_y_gl: f32,
         orb_scale: f32,
     ) {
         let pal = self.active_palette();
         painter.rect_filled(rect, CornerRadius::ZERO, pal.ui_bg_tint);
         let center = Pos2::new(
-            rect.center().x,
+            rect.left() + center_x_gl * rect.width(),
             rect.top() + (1.0 - center_y_gl) * rect.height(),
         );
         let r = rect.width().min(rect.height()) * orb_scale * 0.55;
@@ -1044,10 +1126,21 @@ impl BoogieGui {
             return;
         }
 
-        let max_w = (screen.width() - 56.0).clamp(240.0, 620.0);
+        let split_dock = screen.width() >= 960.0 && self.board_anim > 0.01;
+        let caption_cx = if split_dock {
+            let left_cx = (screen.left() + screen.width() * 0.18).max(screen.left() + 165.0);
+            screen.center().x + (left_cx - screen.center().x) * self.board_anim
+        } else {
+            screen.center().x
+        };
+        let max_w = if split_dock && self.board_anim > 0.25 {
+            (screen.width() * 0.34 - 24.0).clamp(220.0, 380.0)
+        } else {
+            (screen.width() - 56.0).clamp(240.0, 620.0)
+        };
         let caption_area = Rect::from_min_max(
-            Pos2::new(screen.center().x - max_w * 0.5, dock_top - 135.0),
-            Pos2::new(screen.center().x + max_w * 0.5, dock_top - 14.0),
+            Pos2::new(caption_cx - max_w * 0.5, dock_top - 135.0),
+            Pos2::new(caption_cx + max_w * 0.5, dock_top - 14.0),
         );
 
         let mut cursor_y = caption_area.bottom();
@@ -1088,7 +1181,7 @@ impl BoogieGui {
                     });
                     let pill_size = galley.rect.size() + Vec2::new(22.0, 10.0);
                     let pill_rect = Rect::from_center_size(
-                        Pos2::new(screen.center().x, cursor_y - pill_size.y * 0.5),
+                        Pos2::new(caption_cx, cursor_y - pill_size.y * 0.5),
                         pill_size,
                     );
                     painter.rect_filled(
@@ -1136,7 +1229,7 @@ impl BoogieGui {
                     });
                     let pill_size = galley.rect.size() + Vec2::new(24.0, 12.0);
                     let pill_rect = Rect::from_center_size(
-                        Pos2::new(screen.center().x, cursor_y - pill_size.y * 0.5),
+                        Pos2::new(caption_cx, cursor_y - pill_size.y * 0.5),
                         pill_size,
                     );
                     painter.rect_filled(
@@ -1188,8 +1281,7 @@ impl BoogieGui {
                         )
                     });
                     let h = galley.rect.height();
-                    let text_pos =
-                        Pos2::new(screen.center().x - galley.rect.width() * 0.5, cursor_y - h);
+                    let text_pos = Pos2::new(caption_cx - galley.rect.width() * 0.5, cursor_y - h);
                     // Subtle shadow pill behind bright captions for effortless legibility
                     let bg_rect = Rect::from_min_size(text_pos, galley.rect.size())
                         .expand2(Vec2::new(12.0, 4.0));
@@ -1557,8 +1649,15 @@ impl BoogieGui {
     fn draw_floating_dock(&mut self, ui: &mut egui::Ui, screen: Rect) -> f32 {
         let dock_w = 304.0_f32.min(screen.width() - 32.0);
         let dock_h = 54.0_f32;
+        let dock_cx = if screen.width() >= 960.0 && self.board_anim > 0.01 {
+            let left_cx =
+                (screen.left() + screen.width() * 0.18).max(screen.left() + dock_w * 0.5 + 14.0);
+            screen.center().x + (left_cx - screen.center().x) * self.board_anim
+        } else {
+            screen.center().x
+        };
         let dock_rect = Rect::from_center_size(
-            Pos2::new(screen.center().x, screen.bottom() - 18.0 - dock_h * 0.5),
+            Pos2::new(dock_cx, screen.bottom() - 18.0 - dock_h * 0.5),
             Vec2::new(dock_w, dock_h),
         );
 
@@ -1904,6 +2003,133 @@ impl BoogieGui {
         if let Some(resp) = response {
             let _ = self.confirm_tx.try_send(resp);
             self.confirm_pending = None;
+        }
+    }
+
+    fn draw_working_banner(&self, ui: &mut egui::Ui, screen: Rect) {
+        let Some(tp) = &self.task_progress else {
+            return;
+        };
+        let pal = self.active_palette();
+        let accent = pal.ui_secondary;
+        let primary = pal.ui_primary;
+        let t = self.egui_time as f32;
+        let pulse = (0.55 + 0.45 * (t * 4.5).sin()).clamp(0.2, 1.0);
+        let pct = (self.smooth_progress * 100.0).clamp(1.0, 99.0).round() as u32;
+        let elapsed = (self.egui_time - self.task_started_at).max(0.0);
+
+        let card_w = (screen.width() - 40.0).clamp(280.0, 460.0);
+        let card_h = 66.0_f32;
+        let top_y = screen.top()
+            + HEADER_H
+            + if self.banner_error.is_some() {
+                52.0
+            } else {
+                14.0
+            };
+        let card_rect = Rect::from_min_size(
+            Pos2::new(screen.center().x - card_w * 0.5, top_y),
+            Vec2::new(card_w, card_h),
+        );
+
+        let painter = ui.painter();
+        // Frosted glass progress card
+        painter.rect_filled(
+            card_rect,
+            CornerRadius::same(14),
+            Color32::from_rgba_unmultiplied(11, 15, 34, 238),
+        );
+        painter.rect_stroke(
+            card_rect,
+            CornerRadius::same(14),
+            Stroke::new(
+                1.2_f32,
+                Color32::from_rgba_unmultiplied(
+                    accent.r(),
+                    accent.g(),
+                    accent.b(),
+                    (110.0 + pulse * 85.0) as u8,
+                ),
+            ),
+            egui::StrokeKind::Inside,
+        );
+
+        // Row 1: Pulsing indicator + Title + Percentage/Elapsed timer
+        let dot = Pos2::new(card_rect.left() + 16.0, card_rect.top() + 17.0);
+        painter.circle_filled(
+            dot,
+            6.5,
+            Color32::from_rgba_unmultiplied(
+                accent.r(),
+                accent.g(),
+                accent.b(),
+                (pulse * 65.0) as u8,
+            ),
+        );
+        painter.circle_filled(dot, 3.2, accent);
+
+        painter.text(
+            Pos2::new(card_rect.left() + 28.0, card_rect.top() + 17.0),
+            Align2::LEFT_CENTER,
+            truncate_str(&tp.title, 40),
+            FontId::new(11.5, FontFamily::Proportional),
+            TEXT_BRIGHT,
+        );
+        painter.text(
+            Pos2::new(card_rect.right() - 14.0, card_rect.top() + 17.0),
+            Align2::RIGHT_CENTER,
+            format!("{pct}% · {elapsed:.1}s"),
+            FontId::new(10.5, FontFamily::Monospace),
+            accent,
+        );
+
+        // Row 2: Stage + topic detail
+        let stage_line = if tp.detail.trim().is_empty() {
+            tp.stage.clone()
+        } else {
+            format!("{}  ·  {}", tp.stage, tp.detail)
+        };
+        painter.text(
+            Pos2::new(card_rect.left() + 14.0, card_rect.top() + 36.0),
+            Align2::LEFT_CENTER,
+            truncate_str(&stage_line, 66),
+            FontId::new(10.5, FontFamily::Proportional),
+            TEXT_SOFT,
+        );
+
+        // Row 3: Animated glowing progress track + filled bar + moving shimmer
+        let bar_rect = Rect::from_min_max(
+            Pos2::new(card_rect.left() + 14.0, card_rect.bottom() - 14.0),
+            Pos2::new(card_rect.right() - 14.0, card_rect.bottom() - 7.5),
+        );
+        painter.rect_filled(
+            bar_rect,
+            CornerRadius::same(4),
+            Color32::from_rgba_unmultiplied(255, 255, 255, 22),
+        );
+        let fill_w = (bar_rect.width() * self.smooth_progress.clamp(0.04, 1.0)).max(12.0);
+        let fill_rect =
+            Rect::from_min_size(bar_rect.left_top(), Vec2::new(fill_w, bar_rect.height()));
+        let bar_col = lerp_color(primary, accent, 0.55);
+        painter.rect_filled(fill_rect, CornerRadius::same(4), bar_col);
+
+        // Animated light shimmer sweeping smoothly along the filled progress bar
+        let shimmer_frac = (t * 0.85).fract();
+        let shimmer_x = fill_rect.left() + fill_rect.width() * shimmer_frac;
+        let shimmer_rect = Rect::from_center_size(
+            Pos2::new(shimmer_x, fill_rect.center().y),
+            Vec2::new(
+                (fill_rect.width() * 0.25).clamp(14.0, 48.0),
+                fill_rect.height(),
+            ),
+        )
+        .intersect(fill_rect);
+        if shimmer_rect.is_positive() {
+            painter.rect_filled(
+                shimmer_rect,
+                CornerRadius::same(4),
+                Color32::from_rgba_unmultiplied(255, 255, 255, 95),
+            );
         }
     }
 
@@ -2316,6 +2542,14 @@ impl BoogieGui {
                         });
 
                         ui.add_space(8.0);
+                        ui.checkbox(
+                            &mut form.study_visual_enabled,
+                            "Study Visual (Interactive Teaching Board)",
+                        )
+                        .on_hover_text(
+                            "Opens a split-screen interactive board inside Boogie with step-by-step \
+                             walkthroughs, 2D graphs, diagrams, Art Study overlays, and 1-click PDF/Word export.",
+                        );
                         ui.checkbox(&mut form.push_to_talk, "Push-to-Talk (hold Space)");
                         ui.checkbox(&mut form.proactive_audio, "Proactive check-ins");
                         ui.checkbox(
@@ -2328,9 +2562,9 @@ impl BoogieGui {
                         );
 
                         ui.add_space(6.0);
-                        let log_path = crate::config::active_config_dir().join("boogie.log");
+                        let data_dir = crate::config::active_config_dir();
                         ui.label(
-                            RichText::new(format!("Log: {}", log_path.display()))
+                            RichText::new(format!("Saved data (persists across upgrades): {}", data_dir.display()))
                                 .size(10.0)
                                 .color(TEXT_MUTED)
                                 .family(FontFamily::Monospace),
@@ -2392,6 +2626,7 @@ impl BoogieGui {
                             cfg.proactive_audio = Some(form.proactive_audio);
                             cfg.auto_memory_consolidation = Some(form.auto_memory_consolidation);
                             cfg.study_brain = Some(form.study_brain.as_str().to_string());
+                            cfg.study_visual_enabled = Some(form.study_visual_enabled);
                             if !form.is_settings && cfg.dashboard_enabled.is_none() {
                                 cfg.dashboard_enabled = Some(false);
                             }
@@ -2430,6 +2665,10 @@ impl BoogieGui {
             self.color_theme = cfg.color_theme();
             self.current_cfg = Some(cfg.clone());
             self.push_to_talk = cfg.push_to_talk();
+            self.study_visual_enabled = cfg.study_visual_enabled();
+            if !self.study_visual_enabled {
+                self.study_board = None;
+            }
             self.ptt_holding = false;
             self.setup_form = None;
             let _ = self.config_tx.try_send(cfg);
@@ -2500,23 +2739,70 @@ impl eframe::App for BoogieGui {
                 self.draw_live_captions(ui, full_rect, dock_top);
                 self.draw_transcript_drawer(ui, full_rect, dock_top);
 
-                // 4. Frameless Custom Header Bar (top) + Error Banner
+                // 3b. Interactive Split-Screen Study Visual Teaching Board
+                if self.study_visual_enabled && self.board_anim > 0.02 {
+                    let pal = self.active_palette();
+                    let slide_offset = (1.0 - self.board_anim) * 42.0;
+                    let board_rect = if full_rect.width() >= 960.0 {
+                        Rect::from_min_max(
+                            Pos2::new(
+                                full_rect.left() + full_rect.width() * 0.36 + slide_offset,
+                                full_rect.top() + HEADER_H + 10.0,
+                            ),
+                            Pos2::new(full_rect.right() - 14.0, full_rect.bottom() - 14.0),
+                        )
+                    } else if full_rect.width() >= 760.0 {
+                        Rect::from_min_max(
+                            Pos2::new(
+                                full_rect.left() + full_rect.width() * 0.36 + slide_offset,
+                                full_rect.top() + HEADER_H + 10.0,
+                            ),
+                            Pos2::new(full_rect.right() - 14.0, dock_top - 12.0),
+                        )
+                    } else {
+                        Rect::from_min_max(
+                            Pos2::new(
+                                full_rect.left() + 14.0,
+                                full_rect.top() + HEADER_H + full_rect.height() * 0.24,
+                            ),
+                            Pos2::new(full_rect.right() - 14.0, dock_top - 12.0),
+                        )
+                    };
+                    let mut should_close = false;
+                    if let Some(board) = &mut self.study_board {
+                        should_close =
+                            board.draw_panel(ui, board_rect, &pal, self.board_anim, now, dt);
+                    }
+                    if should_close {
+                        self.study_board = None;
+                    }
+                }
+
+                // 4. Frameless Custom Header Bar (top) + Error & Working Banners
                 self.draw_frameless_header(ui, full_rect);
                 self.draw_error_banner(ui, full_rect);
+                self.draw_working_banner(ui, full_rect);
 
                 // 5. Interactive poke/ripple on the 3D orb region (safely bounded between header & lower panels)
+                let wide_split = full_rect.width() >= 760.0;
+                let orb_cx_norm = if wide_split {
+                    0.5 - self.board_anim * 0.31
+                } else {
+                    0.5
+                };
+                let orb_hit_x = full_rect.left() + orb_cx_norm * full_rect.width();
                 let orb_hit_y =
                     full_rect.top() + (1.0 - (0.58 + self.drawer_anim * 0.16)) * full_rect.height();
                 let orb_hit_r = (full_rect.width().min(full_rect.height())
-                    * (0.20 - self.drawer_anim * 0.05))
-                    .max(40.0);
+                    * (0.20 - self.drawer_anim * 0.05 - self.board_anim * 0.06))
+                    .max(36.0);
                 let lower_limit = if self.drawer_open {
                     dock_top - (full_rect.height() * 0.44).clamp(180.0, 380.0) - 18.0
                 } else {
                     dock_top - 140.0
                 };
                 let orb_hit_rect = Rect::from_center_size(
-                    Pos2::new(full_rect.center().x, orb_hit_y),
+                    Pos2::new(orb_hit_x, orb_hit_y),
                     Vec2::splat(orb_hit_r * 2.0),
                 )
                 .intersect(Rect::from_min_max(
@@ -3194,12 +3480,14 @@ pub fn run_gui(
     initial_cfg: Option<ApiConfig>,
     initial_cfg_err: Option<String>,
 ) -> Result<(), eframe::Error> {
+    let window_title = format!("Boogie v{APP_VERSION}");
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0_f32, 800.0_f32])
         .with_min_inner_size([480.0_f32, 540.0_f32])
         .with_maximized(true)
+        .with_visible(true)
         .with_decorations(false)
-        .with_title("Boogie");
+        .with_title(window_title.clone());
 
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(Arc::new(icon));
@@ -3222,7 +3510,7 @@ pub fn run_gui(
     };
 
     eframe::run_native(
-        "Boogie",
+        &window_title,
         options,
         Box::new(move |cc| {
             Ok(Box::new(BoogieGui::new(

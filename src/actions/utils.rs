@@ -37,10 +37,17 @@ pub fn register(registry: &mut ToolRegistry, event_tx: broadcast::Sender<AppEven
     registry.register(
         tool(
             "generate_qrcode",
-            "Generate a QR code PNG image from text.",
+            "Generate a QR code PNG image from text and open the mandatory Windows Save As dialog so the user chooses where to save it.",
             vec![
                 ("data", param("data", "string", "Data to encode")),
-                ("path", param("path", "string", "Output PNG file path")),
+                (
+                    "path",
+                    param(
+                        "path",
+                        "string",
+                        "Suggested filename (e.g. 'wifi_qr.png'); user chooses the final save location in Save As dialog",
+                    ),
+                ),
             ],
             vec!["data"],
         ),
@@ -109,17 +116,52 @@ async fn generate_qrcode(args: Value) -> ToolResult {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let path = args
+    let suggested = args
         .get("path")
         .and_then(|v| v.as_str())
         .unwrap_or("qrcode.png")
+        .trim()
         .to_string();
 
     tokio::task::spawn_blocking(move || match qrcode::QrCode::new(data.as_bytes()) {
         Ok(code) => {
             let img = code.render::<image::Luma<u8>>().build();
-            match img.save(&path) {
-                Ok(_) => ToolResult::ok(format!("QR code saved to {path}")),
+            let sp = std::path::Path::new(&suggested);
+            let initial_dir = sp.parent().filter(|p| p.is_dir());
+            let default_name = sp
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("qrcode.png");
+
+            let chosen = match crate::actions::documents::pick_save_path(
+                "Boogie — Save QR Code As",
+                default_name,
+                "PNG Image",
+                &["png"],
+                initial_dir,
+                false,
+            ) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    crate::confirm::write_audit_log(
+                        "generate_qrcode",
+                        "CANCELLED_USER",
+                        default_name,
+                    );
+                    return ToolResult::ok(
+                        "User cancelled the Save As dialog. QR code was not saved.".to_string(),
+                    );
+                }
+                Err(e) => return ToolResult::err(e),
+            };
+
+            match img.save(&chosen) {
+                Ok(_) => {
+                    let chosen_str = chosen.display().to_string();
+                    crate::confirm::write_audit_log("generate_qrcode", "SAVED", &chosen_str);
+                    ToolResult::ok(format!("QR code saved to {chosen_str}"))
+                }
                 Err(e) => ToolResult::err(format!("save QR: {e}")),
             }
         }

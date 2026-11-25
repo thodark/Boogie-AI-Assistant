@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 pub use crate::memory::{
     DEFAULT_MEMORY_MODEL, Memory, format_memory_for_prompt, load_memory, load_recent_sessions,
@@ -8,6 +9,7 @@ pub use crate::memory::{
 use crate::util::truncate_chars;
 
 const EMBEDDED_PROMPT: &str = include_str!("../core/prompt.txt");
+static MIGRATION_DONE: OnceLock<()> = OnceLock::new();
 
 pub const DEFAULT_LIVE_MODEL: &str = "models/gemini-3.1-flash-live-preview";
 pub const DEFAULT_API_VERSION: &str = "v1alpha";
@@ -21,12 +23,83 @@ fn appdata_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("Boogie"))
 }
 
+/// Returns true only when the user explicitly opted into USB-portable storage by placing
+/// a `portable.txt` marker next to the executable.
+fn is_portable_mode() -> bool {
+    exe_dir().join("portable.txt").exists()
+}
+
+/// Copies legacy user data (`api_keys.json`, `memory.json`, `long_term.json`) from a local
+/// folder into `dst_dir` without overwriting any existing files in `dst_dir`.
+pub fn migrate_user_files_between_dirs(src_dir: &Path, dst_dir: &Path) -> usize {
+    if !src_dir.is_dir() || src_dir == dst_dir {
+        return 0;
+    }
+    let mut copied = 0usize;
+    for filename in ["api_keys.json", "memory.json", "long_term.json"] {
+        let src = src_dir.join(filename);
+        let dst = dst_dir.join(filename);
+        if !src.is_file() || dst.exists() {
+            continue;
+        }
+        if filename == "api_keys.json"
+            && let Ok(text) = std::fs::read_to_string(&src)
+            && (text.trim().is_empty() || text.contains("YOUR_GEMINI_API_KEY"))
+        {
+            continue;
+        }
+        if std::fs::create_dir_all(dst_dir).is_ok() && std::fs::copy(&src, &dst).is_ok() {
+            copied += 1;
+        }
+    }
+    copied
+}
+
+/// Ensures user settings, API key, and memory live persistently in `%APPDATA%\Boogie\`
+/// so deleting an old Boogie folder and launching a newer version keeps everything intact.
+/// Automatically migrates legacy `v0.1–v0.3` data from `<exe_dir>\config\` on first run.
+pub fn ensure_persistent_data_migrated() {
+    MIGRATION_DONE.get_or_init(|| {
+        if is_portable_mode() {
+            return;
+        }
+        let Some(dst) = appdata_dir() else {
+            return;
+        };
+        let mut legacy_dirs = vec![exe_dir().join("config")];
+        if let Ok(cwd) = std::env::current_dir() {
+            let p = cwd.join("config");
+            if !legacy_dirs.contains(&p) {
+                legacy_dirs.push(p);
+            }
+        }
+        for src in legacy_dirs {
+            let n = migrate_user_files_between_dirs(&src, &dst);
+            if n > 0 {
+                tracing::info!(
+                    "migrated {n} persistent user file(s) from {} to {}",
+                    src.display(),
+                    dst.display()
+                );
+            }
+        }
+    });
+}
+
 /// Candidate locations for `api_keys.json` in priority order:
-/// 1. `<exe_dir>/config/api_keys.json`
-/// 2. `<cwd>/config/api_keys.json`
-/// 3. `%APPDATA%/Boogie/api_keys.json`
+/// - Normal mode (upgrade-safe): `%APPDATA%/Boogie/api_keys.json` -> `<exe_dir>/config/api_keys.json` -> `<cwd>/config/api_keys.json`
+/// - Portable override (`portable.txt` next to exe): `<exe_dir>/config/api_keys.json` first.
 fn config_candidates() -> Vec<PathBuf> {
-    let mut paths = vec![exe_dir().join("config").join("api_keys.json")];
+    let mut paths = Vec::new();
+    if is_portable_mode() {
+        paths.push(exe_dir().join("config").join("api_keys.json"));
+    } else if let Some(ad) = appdata_dir() {
+        paths.push(ad.join("api_keys.json"));
+    }
+    let exe_cfg = exe_dir().join("config").join("api_keys.json");
+    if !paths.contains(&exe_cfg) {
+        paths.push(exe_cfg);
+    }
     if let Ok(cwd) = std::env::current_dir() {
         let p = cwd.join("config").join("api_keys.json");
         if !paths.contains(&p) {
@@ -34,19 +107,23 @@ fn config_candidates() -> Vec<PathBuf> {
         }
     }
     if let Some(ad) = appdata_dir() {
-        paths.push(ad.join("api_keys.json"));
+        let p = ad.join("api_keys.json");
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
     }
     paths
 }
 
-/// Resolves the active config directory (where `api_keys.json` was found, or the default writable path).
+/// Resolves the active persistent data directory (`%APPDATA%/Boogie` by default so deleting
+/// old Boogie folders never wipes API keys, settings, or memories).
 pub fn active_config_dir() -> PathBuf {
-    for p in config_candidates() {
-        if p.exists()
-            && let Some(parent) = p.parent()
-        {
-            return parent.to_path_buf();
-        }
+    ensure_persistent_data_migrated();
+    if is_portable_mode() {
+        return exe_dir().join("config");
+    }
+    if let Some(ad) = appdata_dir() {
+        return ad;
     }
     exe_dir().join("config")
 }
@@ -163,9 +240,9 @@ impl StudyBrainMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Auto => "Auto (Pro -> Flash)",
-            Self::Flash => "Flash Thinking (Fast / High Quota)",
-            Self::Pro => "Pro Deep Thinking (Max Accuracy)",
+            Self::Auto => "Auto (Verified Fast Thinking — Recommended)",
+            Self::Flash => "Flash Direct Vision (~1.2s — Zero REST Quota)",
+            Self::Pro => "Pro 3.1 Deep Thinking (Paid API Key)",
         }
     }
 
@@ -213,12 +290,15 @@ pub struct ApiConfig {
     pub memory_model: Option<String>,
     #[serde(default)]
     pub study_brain: Option<String>,
+    #[serde(default)]
+    pub study_visual_enabled: Option<bool>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
 
 impl ApiConfig {
     pub fn load() -> Result<Self, String> {
+        ensure_persistent_data_migrated();
         let candidates = config_candidates();
         for path in &candidates {
             if path.exists() {
@@ -328,6 +408,10 @@ impl ApiConfig {
             .as_deref()
             .map(StudyBrainMode::from_str_loose)
             .unwrap_or_default()
+    }
+
+    pub fn study_visual_enabled(&self) -> bool {
+        self.study_visual_enabled.unwrap_or(true)
     }
 }
 
@@ -583,6 +667,7 @@ mod tests {
         assert_eq!(cfg.graphics_quality(), GraphicsQuality::High);
         assert_eq!(cfg.color_theme(), ColorTheme::Obsidian);
         assert_eq!(cfg.study_brain_mode(), StudyBrainMode::Auto);
+        assert!(cfg.study_visual_enabled());
     }
 
     #[test]
@@ -599,5 +684,52 @@ mod tests {
             StudyBrainMode::from_str_loose("unknown"),
             StudyBrainMode::Auto
         );
+    }
+
+    #[test]
+    fn migrates_legacy_data_without_overwriting_existing_or_placeholders() {
+        let base = std::env::temp_dir().join(format!("boogie_mig_test_{}", std::process::id()));
+        let src = base.join("old_folder");
+        let dst = base.join("appdata_boogie");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        std::fs::write(
+            src.join("api_keys.json"),
+            r#"{"gemini_api_key":"AIzaReal"}"#,
+        )
+        .unwrap();
+        std::fs::write(src.join("memory.json"), r#"{"user":{"name":"Suyz"}}"#).unwrap();
+        std::fs::write(
+            dst.join("long_term.json"),
+            r#"{"sessions":[{"date":"new"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("long_term.json"),
+            r#"{"sessions":[{"date":"old"}]}"#,
+        )
+        .unwrap();
+
+        let copied = migrate_user_files_between_dirs(&src, &dst);
+        assert_eq!(copied, 2);
+        assert!(
+            std::fs::read_to_string(dst.join("api_keys.json"))
+                .unwrap()
+                .contains("AIzaReal")
+        );
+        assert!(
+            std::fs::read_to_string(dst.join("memory.json"))
+                .unwrap()
+                .contains("Suyz")
+        );
+        assert!(
+            std::fs::read_to_string(dst.join("long_term.json"))
+                .unwrap()
+                .contains("new")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
