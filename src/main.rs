@@ -943,6 +943,9 @@ async fn run_session(
         let mut ptt_was_active = false;
         let mut model_turn_active = false;
         let mut ignore_next_silent_turn_complete: usize = 0;
+        let mut turn_audio_bytes: usize = 0;
+        let mut turn_output_chars: usize = 0;
+        let mut pending_vision_audio_check = false;
         let mut tools_in_flight: usize = 0;
         let mut deferred_refresh = false;
         let mut last_sent_audio_level: f32 = -1.0;
@@ -1078,6 +1081,8 @@ async fn run_session(
                                 model_turn_active = true;
                                 echo_guard.on_model_response_started();
                             }
+                            turn_audio_bytes += data.len();
+                            pending_vision_audio_check = false;
                             awaiting_response_since = None;
                             if let Some(t0) = response_timer.take() {
                                 tracing::info!(
@@ -1105,6 +1110,7 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::OutputTranscript(text) => {
+                            turn_output_chars += text.chars().count();
                             awaiting_response_since = None;
                             let _ = event_tx.send(AppEvent::Log(format!("Boogie: {text}")));
                             shared.lock().await.push_turn("assistant", &text);
@@ -1118,6 +1124,9 @@ async fn run_session(
 
                         gemini::GeminiEvent::Interrupted => {
                             model_turn_active = false;
+                            pending_vision_audio_check = false;
+                            turn_audio_bytes = 0;
+                            turn_output_chars = 0;
                             awaiting_response_since = None;
                             response_timer = None;
                             tracing::info!("server interrupted playback — clearing speaker buffer");
@@ -1135,13 +1144,34 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::TurnComplete => {
-                            if !model_turn_active && ignore_next_silent_turn_complete > 0 {
+                            if !model_turn_active
+                                && turn_output_chars == 0
+                                && ignore_next_silent_turn_complete > 0
+                            {
                                 ignore_next_silent_turn_complete -= 1;
                                 continue;
                             }
+                            let missed_vision_audio = pending_vision_audio_check
+                                && turn_audio_bytes == 0
+                                && turn_output_chars > 0;
+                            pending_vision_audio_check = false;
+                            turn_audio_bytes = 0;
+                            turn_output_chars = 0;
                             model_turn_active = false;
                             awaiting_response_since = None;
                             response_timer = None;
+                            if missed_vision_audio {
+                                tracing::warn!(
+                                    "Gemini Live emitted text-only vision reply with 0 audio bytes — nudging spoken readback"
+                                );
+                                let now = Instant::now();
+                                awaiting_response_since = Some(now);
+                                response_timer = Some(now);
+                                let _ = session
+                                    .send_text("Hãy đọc to câu trả lời vừa rồi thành tiếng thật tự nhiên và ngắn gọn (không dùng LaTeX hay markdown).")
+                                    .await;
+                                continue;
+                            }
                             saw_untrusted_in_turn = false;
                             if speaker_queued.load(Ordering::Acquire) == 0 {
                                 shared.lock().await.is_speaking = false;
@@ -1234,6 +1264,9 @@ async fn run_session(
                     }
                     if has_silent_vision {
                         ignore_next_silent_turn_complete += 1;
+                        pending_vision_audio_check = true;
+                        turn_audio_bytes = 0;
+                        turn_output_chars = 0;
                     }
                     for (jpeg, prompt) in outcome.vision_turns {
                         if let Err(e) = session.send_image_turn(&jpeg, &prompt).await {

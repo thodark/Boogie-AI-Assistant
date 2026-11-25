@@ -92,7 +92,9 @@ async fn capture_screen_vision(args: Value, event_tx: broadcast::Sender<AppEvent
                                 let kb = jpeg.len() / 1024;
                                 ToolResult::ok_with_image(
                                     format!(
-                                        "[FRESH SCREEN CAPTURE #{cap_id} · Active Window: '{win_title}' · Monitor {monitor} ({out_w}x{out_h}, {kb} KB JPEG, scale {:.2}) — IGNORE ALL PREVIOUS SCREENSHOTS/TABS! Read ONLY this brand-new image attached to this tool response and answer accurately.]",
+                                        "Here is the brand-new screenshot (capture #{cap_id}, active window: '{win_title}', monitor {monitor}, {out_w}x{out_h}, {kb} KB JPEG, scale {:.2}). \
+                                         Ignore any previous screenshots or older tabs and look only at this image. \
+                                         Speak aloud naturally and concisely in the user's language (no markdown or LaTeX) to answer their question.",
                                         info.scale_factor
                                     ),
                                     jpeg,

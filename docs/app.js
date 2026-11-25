@@ -21,11 +21,11 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Liên hệ",
       "nav.cta": "Tải ngay",
-      "hero.badge": "Mới v0.4.3: Vision 1,120-token thật (đọc chuẩn Toán 12 & phân số ~1s, 0 tốn quota REST)",
+      "hero.badge": "Mới v0.4.4: Vision 1,120-token thật — đọc chuẩn & phát giọng nói 100% (~1s, 0 tốn quota REST)",
       "hero.title": 'Trợ lý AI giọng nói <span class="gradient-text">kiểu JARVIS</span> ngay trên Windows của bạn.',
       "hero.subtitle": "Tải về là chạy ngay — không cần cài đặt phức tạp, không cần biết code. Nói chuyện tự nhiên tiếng Việt / Anh với phản hồi ~0.58 giây, bảng dạy học tương tác Study Visual (đồ thị, sơ đồ, Art Study), xuất đề cương PDF/Word/Excel có hộp thoại chọn chỗ lưu, điều khiển 46 tác vụ Windows và trí nhớ thông minh.",
       "hero.downloadZip": "Tải cho Windows (ZIP — Khuyên dùng)",
-      "hero.downloadExe": "Bản Portable 1 file (Boogie-v0.4.3.exe)",
+      "hero.downloadExe": "Bản Portable 1 file (Boogie-v0.4.4.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
       "hero.trust2": "Không cần Rust, Cargo hay Python",
       "hero.trust3": "Chạy Portable không cần cài",
@@ -43,7 +43,7 @@
       "download.zipDesc": "Gói Portable đầy đủ gồm file <code>.exe</code> kèm số phiên bản, mẫu cấu hình, hướng dẫn và giấy phép MIT. Xóa thư mục bản cũ tải bản mới vẫn giữ nguyên 100% API key và trí nhớ!",
       "download.exeDesc": "Bản chạy thẳng 1 tệp duy nhất có kèm số phiên bản trên tên file (vd: <code>Boogie-v0.4.0.exe</code>). API key, cấu hình và bộ nhớ lưu bền vững trong <code>%APPDATA%\\Boogie\\</code> nên đổi bản mới không lo mất dữ liệu.",
       "download.zipBtn": "Tải gói ZIP",
-      "download.exeBtn": "Tải Boogie-v0.4.3.exe",
+      "download.exeBtn": "Tải Boogie-v0.4.4.exe",
       "sha.title": "Kiểm tra mã toàn vẹn SHA-256",
       "sha.desc": "Đối chiếu mã SHA-256 sau khi tải để chắc chắn 100% file nguyên bản từ GitHub Releases và không bị chỉnh sửa.",
       "sha.fileCol": 'Tệp phát hành (<span id="sha-release-tag">latest</span>)',
@@ -121,11 +121,11 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Contact",
       "nav.cta": "Download",
-      "hero.badge": "New in v0.4.3: True 1,120-Token Live Vision (~1s Accurate Math OCR, Zero REST Quota)",
+      "hero.badge": "New in v0.4.4: True 1,120-Token Live Vision with 100% Reliable Spoken Audio (~1s, Zero REST Quota)",
       "hero.title": 'A <span class="gradient-text">JARVIS-style</span> real-time voice AI assistant for Windows.',
       "hero.subtitle": "Download and run instantly — no installer, no Rust or Python, no coding required. Talk naturally in English or Vietnamese (~0.58s TTFB), open an interactive split-screen Study Visual & Art Study board, export PDF/Word/Excel study guides with a mandatory Windows Save As picker, and automate 46 Windows tools.",
       "hero.downloadZip": "Download for Windows (ZIP — Recommended)",
-      "hero.downloadExe": "Portable Single File (Boogie-v0.4.3.exe)",
+      "hero.downloadExe": "Portable Single File (Boogie-v0.4.4.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
       "hero.trust2": "No Rust, Cargo, or Python needed",
       "hero.trust3": "Portable — zero installation",
@@ -143,7 +143,7 @@
       "download.zipDesc": "Complete bundle with the versioned <code>.exe</code>, example config, README, and MIT License. Delete old folders anytime when upgrading — your API key and memories stay safe!",
       "download.exeDesc": "Standalone single executable clearly labeled with its version (e.g. <code>Boogie-v0.4.0.exe</code>). API key, settings, and memories are stored persistently in <code>%APPDATA%\\Boogie\\</code> across upgrades.",
       "download.zipBtn": "Download ZIP Bundle",
-      "download.exeBtn": "Download Boogie-v0.4.3.exe",
+      "download.exeBtn": "Download Boogie-v0.4.4.exe",
       "sha.title": "Verify Release Integrity (SHA-256)",
       "sha.desc": "Compare your downloaded file's SHA-256 hash to guarantee it came untouched from official GitHub Releases.",
       "sha.fileCol": 'Release file (<span id="sha-release-tag">latest</span>)',
@@ -528,6 +528,14 @@
   ];
 
   const CHANGELOG = {
+    v044: {
+      vi: [
+        "<strong>Sửa triệt để lỗi chỉ hiện đáp án qua khung chat mà không đọc thành tiếng:</strong> Thay prompt thẻ ngoặc vuông (dễ kích hoạt lỗi xuất LaTeX 0 byte âm thanh của Gemini 3.1 Live) bằng lời nhắc nói tự nhiên và bổ sung cơ chế tự phát hiện lượt không có âm thanh trong <code>main.rs</code> để đảm bảo Boogie luôn đọc đáp án thành tiếng rõ ràng (~0.8–2s).",
+      ],
+      en: [
+        "<strong>Fixed Missing Spoken Audio on High-Res Vision Replies:</strong> Replaced bracketed system tags inside <code>clientContent</code> image turns (which triggered Gemini 3.1 Live's 0-audio-byte LaTeX text bug) with natural spoken instructions and added an automatic zero-audio readback guard in <code>main.rs</code> so answers are always spoken aloud.",
+      ],
+    },
     v043: {
       vi: [
         "<strong>Mở khóa Vision 1,120-token thật trên Gemini Live (<code>SILENT toolResponse</code> + <code>clientContent</code>):</strong> Đóng tool chụp ảnh bằng <code>scheduling: \"SILENT\"</code> và gửi ảnh sắc nét ngay trong lượt <code>clientContent</code> (<code>MEDIA_RESOLUTION_HIGH</code> thật), khắc phục hoàn toàn việc <code>realtimeInput.video</code> và <code>functionResponse.parts</code> bị nén mờ ~256 token — đọc chuẩn từng tọa độ, dấu +/- và công thức Toán 12 trong ~1 giây mà không tốn quota REST.",
@@ -808,6 +816,7 @@
   }
 
   function renderChangelog() {
+    const v044 = document.getElementById("cl-v044");
     const v043 = document.getElementById("cl-v043");
     const v042 = document.getElementById("cl-v042");
     const v041 = document.getElementById("cl-v041");
@@ -815,6 +824,7 @@
     const v030 = document.getElementById("cl-v030");
     const v020 = document.getElementById("cl-v020");
     const v010 = document.getElementById("cl-v010");
+    if (v044) v044.innerHTML = CHANGELOG.v044[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v043) v043.innerHTML = CHANGELOG.v043[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v042) v042.innerHTML = CHANGELOG.v042[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v041) v041.innerHTML = CHANGELOG.v041[currentLang].map((li) => `<li>${li}</li>`).join("");
@@ -878,7 +888,7 @@
     syncReleaseTagText();
   }
 
-  let latestTagText = "v0.4.3";
+  let latestTagText = "v0.4.4";
   function syncReleaseTagText() {
     const shaTag = document.getElementById("sha-release-tag");
     if (shaTag) shaTag.textContent = latestTagText;
@@ -895,7 +905,7 @@
       });
       if (!res.ok) throw new Error("release fetch failed");
       const rel = await res.json();
-      const tag = rel.tag_name || "v0.4.3";
+      const tag = rel.tag_name || "v0.4.4";
       latestTagText = tag;
 
       ["nav-version", "hero-release-tag", "card-zip-version", "card-exe-version", "sha-release-tag"].forEach((id) => {

@@ -951,6 +951,36 @@ fn extract_answer_text(resp: &Value) -> Option<String> {
     }
 }
 
+fn build_spoken_vision_prompt(
+    capture_id: u64,
+    source_desc: &str,
+    question: &str,
+    language: &str,
+    level: &str,
+    mode: &str,
+) -> String {
+    if language.to_ascii_lowercase().contains("viet") {
+        format!(
+            "Đây là ảnh chụp màn hình mới nhất (lần chụp #{capture_id}, {source_desc}). \
+             Bỏ qua hoàn toàn mọi ảnh hay tab cũ trước đó và chỉ nhìn ảnh này. \
+             Hãy đọc thật kỹ đề bài và 4 đáp án A, B, C, D trên ảnh cho yêu cầu \"{question}\" \
+             (cấp học: {level}, chế độ: {mode}), kiểm tra cẩn thận từng dấu cộng trừ và đối chiếu khớp đúng \
+             1 trong 4 đáp án có trên ảnh — nếu ký tự nào quá nhỏ hoặc mờ không chắc chắn 100% thì báo thật để người dùng phóng to thay vì đoán bừa. \
+             Hãy NÓI THÀNH TIẾNG thật tự nhiên, rõ ràng và gọn trong 2 đến 4 câu bằng tiếng Việt, \
+             tuyệt đối không viết ký hiệu LaTeX hay markdown."
+        )
+    } else {
+        format!(
+            "This is the latest screenshot (capture #{capture_id}, {source_desc}). \
+             Ignore all earlier screenshots or tabs and read only this image. \
+             Carefully read the exact question and all visible A, B, C, D choices for \"{question}\" \
+             (level: {level}, mode: {mode}), double-check every sign and number so your result matches one of the visible options \
+             (if any digit is genuinely too small or blurry, tell the user to zoom in instead of guessing). \
+             SPEAK ALOUD naturally and concisely in 2 to 4 sentences in {language} — do not output LaTeX or markdown formatting."
+        )
+    }
+}
+
 async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>) -> ToolResult {
     let question = args
         .get("question")
@@ -1107,14 +1137,13 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
             jpeg.len() / 1024
         )));
         return ToolResult::ok_with_image(
-            format!(
-                "[FRESH HIGH-RES SCREENSHOT CAPTURE #{capture_id} ({}) — DISCARD AND IGNORE ALL PREVIOUS SCREENSHOTS/TABS FROM EARLIER TURNS! \
-                 Inspect ONLY the image attached to THIS tool response. \
-                 ANTI-HALLUCINATION PROTOCOL: (1) Read the exact requested question and its exact A/B/C/D options verbatim from THIS image; \
-                 (2) Solve step-by-step concisely and verify every +/- sign & number matches ONE of the visible options A/B/C/D; \
-                 (3) NEVER invent an answer that is not among the visible options — if any symbol/digit is genuinely too small or blurry to be 100% certain, tell the user honestly to zoom in (Ctrl+) or snip it with Win+Shift+S! \
-                 Answer clearly in {language} (level={level}, mode={mode}). Request: {question}]",
-                img.source_desc
+            build_spoken_vision_prompt(
+                capture_id,
+                &img.source_desc,
+                &question,
+                &language,
+                &level,
+                &mode,
             ),
             jpeg,
         );
@@ -1162,10 +1191,13 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
                     img.source_desc
                 )));
                 return ToolResult::ok_with_image(
-                    format!(
-                        "[FRESH HIGH-RES LIVE VISION FALLBACK CAPTURE #{capture_id} ({}) — DISCARD ALL PREVIOUS SCREENSHOTS/TABS! Secondary REST solver is at quota, so solve directly from THIS attached image without mentioning any error. \
-                         Read the exact requested question & all visible A/B/C/D options first, compute carefully checking every +/- sign, and verify your answer matches one of the visible options verbatim (if any digit is genuinely too small/unclear, ask the user to zoom in or snip with Win+Shift+S instead of guessing). Answer in {language} (level={level}, mode={mode}). Request: {question}]",
-                        img.source_desc
+                    build_spoken_vision_prompt(
+                        capture_id,
+                        &img.source_desc,
+                        &question,
+                        &language,
+                        &level,
+                        &mode,
                     ),
                     jpeg,
                 );
