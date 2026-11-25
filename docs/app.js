@@ -21,9 +21,9 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Liên hệ",
       "nav.cta": "Tải ngay",
-      "hero.badge": "Mới: 3 mức đồ họa, 8 chủ đề màu & Trí nhớ thông minh",
+      "hero.badge": "Mới v0.3.0: Study Brain giải mọi môn (Cấp 1 → Đại học) chuẩn xác cao",
       "hero.title": 'Trợ lý AI giọng nói <span class="gradient-text">kiểu JARVIS</span> ngay trên Windows của bạn.',
-      "hero.subtitle": "Tải về là chạy ngay — không cần cài đặt phức tạp, không cần biết code. Nói chuyện tự nhiên bằng tiếng Việt hoặc tiếng Anh với phản hồi ~0.58 giây, nhìn thấy màn hình, điều khiển 43 tác vụ Windows và nhớ những gì bạn kể.",
+      "hero.subtitle": "Tải về là chạy ngay — không cần cài đặt phức tạp, không cần biết code. Nói chuyện tự nhiên bằng tiếng Việt hoặc tiếng Anh với phản hồi ~0.58 giây, gia sư AI giải mọi môn từ Cấp 1 đến Đại học từ màn hình sắc nét, điều khiển 44 tác vụ Windows và nhớ những gì bạn kể.",
       "hero.downloadZip": "Tải cho Windows (ZIP — Khuyên dùng)",
       "hero.downloadExe": "Bản Portable 1 file (boogie.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
@@ -34,7 +34,7 @@
       "stats.startup": "Mở cửa sổ tức thì",
       "stats.ttfb": "Độ trễ phản hồi giọng nói",
       "stats.ram": "RAM thực tế siêu nhẹ",
-      "stats.tools": "Công cụ điều khiển Windows",
+      "stats.tools": "Công cụ Windows & Gia sư AI",
       "download.eyebrow": "TẢI XUỐNG CHÍNH THỨC",
       "download.title": "Chọn bản phù hợp với bạn",
       "download.desc": "Tất cả bản phát hành đều được biên dịch tự động trực tiếp từ mã nguồn công khai trên GitHub Actions, không chứa phần mềm quảng cáo.",
@@ -121,9 +121,9 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Contact",
       "nav.cta": "Download",
-      "hero.badge": "New: 3 Graphics Tiers, 8 Color Themes & Smart Memory",
+      "hero.badge": "New in v0.3.0: Deep Study Brain for All Subjects (Grade 1 to University)",
       "hero.title": 'A <span class="gradient-text">JARVIS-style</span> real-time voice AI assistant for Windows.',
-      "hero.subtitle": "Download and run instantly — no installer, no Rust or Python, no coding required. Talk naturally in English or Vietnamese with ~0.58s response speed, live screen vision, 43 Windows automation tools, and smart long-term memory.",
+      "hero.subtitle": "Download and run instantly — no installer, no Rust or Python, no coding required. Talk naturally in English or Vietnamese with ~0.58s response speed, a lossless-PNG Deep Study Brain for every subject from elementary to university, 44 Windows tools, and smart memory.",
       "hero.downloadZip": "Download for Windows (ZIP — Recommended)",
       "hero.downloadExe": "Portable Single File (boogie.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
@@ -134,7 +134,7 @@
       "stats.startup": "Window ready cold start",
       "stats.ttfb": "Avg voice response TTFB",
       "stats.ram": "Private RAM footprint",
-      "stats.tools": "Native Windows tools",
+      "stats.tools": "Windows Tools & Study Brain",
       "download.eyebrow": "OFFICIAL DOWNLOADS",
       "download.title": "Choose your Windows package",
       "download.desc": "Every release binary is automatically built from public source code on GitHub Actions — clean, portable, and ad-free.",
@@ -217,6 +217,7 @@
 
   const COMMAND_CATEGORIES = [
     { id: "all", vi: "Tất cả", en: "All" },
+    { id: "study", vi: "Học tập (Cấp 1 → ĐH)", en: "Study Brain" },
     { id: "apps", vi: "App & Web", en: "Apps & Web" },
     { id: "pc", vi: "Điều khiển PC", en: "PC Control" },
     { id: "vision", vi: "Nhìn màn hình", en: "Screen Vision" },
@@ -227,6 +228,33 @@
   ];
 
   const COMMAND_CARDS = [
+    {
+      cat: "study",
+      icon: "🎓",
+      confirm: false,
+      vi: {
+        title: "Study Brain — Gia sư mọi môn (Cấp 1 → Đại học)",
+        desc: "Chụp ảnh PNG lossless siêu nét (từ màn hình hoặc ảnh cắt Win+Shift+S trong clipboard), đọc chuẩn từng dấu +/-, số mũ, phân số và suy luận sâu kiểm chứng đáp án cho Toán, Lý, Hóa, Sinh, Tin/Code, Tiếng Anh, Văn, Sử, Địa, Kinh tế, Đại học. Lời giải đầy đủ hiện ngay thẻ có nút Copy trong khung lịch sử!",
+        examples: [
+          "Giải câu 3 đề toán trên màn hình giúp mình, giải theo cách cấp 3",
+          "Mình vừa chụp bài bằng Win+Shift+S, đọc ảnh clipboard rồi giải giúp mình",
+          "Kiểm tra bài giải trên màn hình xem mình sai dấu ở bước nào",
+          "Đừng đọc đáp án vội, gợi ý từng bước bài Giải tích 2 này giúp mình",
+        ],
+        tip: "Mẹo cực chuẩn: Nhấn Win+Shift+S cắt gọn đúng câu bài tập rồi nói \"giải ảnh trong clipboard\" để đạt độ chính xác gần như tuyệt đối. Đổi model Pro / Flash trong ⚙ Settings → Study Brain.",
+      },
+      en: {
+        title: "Study Brain — All Subjects (Grade 1 to University)",
+        desc: "Captures crisp lossless PNG (full screen or Win+Shift+S clipboard snip), accurately transcribes minus/plus signs, exponents & fractions, and runs deep thinking with self-verification for Math, Physics, Chemistry, Biology, CS/SQL, English, Humanities & University courses. Full copyable steps appear in the drawer!",
+        examples: [
+          "Solve question 3 on my screen step by step",
+          "I just snipped a math problem with Win+Shift+S — solve the image in my clipboard",
+          "Check my solution on screen and tell me which step has a sign mistake",
+          "Don't spoil the final answer — give me hints for this calculus problem",
+        ],
+        tip: "Pro tip: Snip just the exercise with Win+Shift+S and say \"solve the clipboard image\" for near-perfect OCR accuracy. Switch Pro / Flash anytime in ⚙ Settings → Study Brain.",
+      },
+    },
     {
       cat: "apps",
       icon: "🚀",
@@ -446,6 +474,20 @@
   ];
 
   const CHANGELOG = {
+    v030: {
+      vi: [
+        "<strong>Study Brain (<code>study_solve</code>) — Hỗ trợ mọi môn từ Cấp 1 → Đại học:</strong> Tách riêng bộ não học tập suy luận sâu dùng ảnh <strong>PNG lossless độ phân giải gốc (≤2560px)</strong> + <code>MEDIA_RESOLUTION_HIGH</code> + <code>thinkingBudget: 8192</code> trên <code>gemini-2.5-pro</code> (tự động dự phòng sang <code>gemini-2.5-flash</code> nếu Pro hết quota).",
+        "<strong>Đọc dấu &amp; kiểm chứng đáp án chặt chẽ:</strong> Đọc chép lại chính xác từng dấu <code>+ / -</code>, số mũ, phân số, trắc nghiệm A/B/C/D trước khi giải, tự thế ngược kiểm tra lại kết quả và báo thật nếu ảnh mờ/bị che thay vì đoán bừa.",
+        "<strong>Hỗ trợ ảnh cắt <code>Win+Shift+S</code> (Clipboard) &amp; 4 chế độ học:</strong> Chọn giải thẳng (<code>solve</code>), gợi ý từng bước không lộ đáp án (<code>hint</code>), chấm bài tìm lỗi sai dấu (<code>check</code>), giảng lý thuyết (<code>explain</code>) — tự điều chỉnh phương pháp theo đúng cấp học (Cấp 1, Cấp 2, Cấp 3, Đại học).",
+        "<strong>Thẻ lời giải Copy 1 click &amp; ảnh màn hình sắc nét hơn:</strong> Nâng bộ lọc ảnh sang <code>Lanczos3</code>, nâng <code>screen_process</code> lên <code>1920px Q92</code>, thêm mục chọn <strong>Study Brain</strong> trong Settings và thẻ lời giải rõ ràng có nút <strong>Copy</strong> ngay trong khung lịch sử.",
+      ],
+      en: [
+        "<strong>Deep Study Brain (<code>study_solve</code>) — Grade 1 through University:</strong> Dedicated two-brain architecture sending <strong>lossless full-res PNG (≤2560px)</strong> + <code>MEDIA_RESOLUTION_HIGH</code> + <code>thinkingBudget: 8192</code> to <code>gemini-2.5-pro</code> (with automatic seamless fallback to <code>gemini-2.5-flash</code> on rate limits).",
+        "<strong>Strict Sign OCR &amp; Double-Check Verification:</strong> Verbatim transcription of signs (<code>+ / -</code>), exponents, subscripts, fractions &amp; A/B/C/D options before solving, independent substitution verification, and honest blur reporting instead of guessing.",
+        "<strong><code>Win+Shift+S</code> Clipboard Snips &amp; 4 Tutoring Modes:</strong> Supports <code>solve</code>, <code>hint</code> (Socratic hints), <code>check</code> (find exact sign/step mistake), and <code>explain</code> — adapting methods to Primary, Middle, High School, or University level.",
+        "<strong>Copyable Study Solution Card &amp; Sharper Vision:</strong> Upgraded resize filter to <code>Lanczos3</code>, bumped <code>screen_process</code> to <code>1920px Q92</code>, added a <strong>Study Brain</strong> selector in Settings, and added a dedicated <strong>Study Card</strong> with 1-click <strong>Copy</strong> inside the conversation drawer.",
+      ],
+    },
     v020: {
       vi: [
         "<strong>3 mức đồ họa Orb (Low / Medium / High):</strong> Chọn ngay từ màn hình Setup hoặc trong Settings với live preview, FPS thích ứng (30 / 45 / 60 FPS) và MSAA thích ứng (0x / 2x / 4x). Bản <code>Low (Lite)</code> nhẹ hơn ~15× cho máy yếu nhưng vẫn giữ orb kính 3D phát sáng và vòng quỹ đạo.",
@@ -659,8 +701,10 @@
   }
 
   function renderChangelog() {
+    const v030 = document.getElementById("cl-v030");
     const v020 = document.getElementById("cl-v020");
     const v010 = document.getElementById("cl-v010");
+    if (v030) v030.innerHTML = CHANGELOG.v030[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v020) v020.innerHTML = CHANGELOG.v020[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v010) v010.innerHTML = CHANGELOG.v010[currentLang].map((li) => `<li>${li}</li>`).join("");
   }
@@ -719,7 +763,7 @@
     syncReleaseTagText();
   }
 
-  let latestTagText = "v0.2.0";
+  let latestTagText = "v0.3.0";
   function syncReleaseTagText() {
     const shaTag = document.getElementById("sha-release-tag");
     if (shaTag) shaTag.textContent = latestTagText;

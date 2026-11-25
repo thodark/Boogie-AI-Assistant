@@ -81,7 +81,8 @@ To pre-configure manually without using the Setup modal, copy `config/api_keys.e
   "graphics_quality": "high",
   "color_theme": "obsidian",
   "auto_memory_consolidation": true,
-  "memory_model": "gemini-2.5-flash-lite"
+  "memory_model": "gemini-2.5-flash-lite",
+  "study_brain": "auto"
 }
 ```
 
@@ -110,7 +111,7 @@ Get-FileHash .\boogie.exe -Algorithm SHA256
 
 ## Why Rust? — Blazing Fast Startup & Tiny RAM Footprint
 
-Boogie was rewritten from the ground up in **pure Rust** to eliminate interpreter overhead, PyQt/Chromium bloat, and sluggish cold starts — while delivering a **60 FPS raymarched 3D GPU interface**, **real-time screen vision**, and **43 native Windows automation tools** inside a single self-contained `.exe`.
+Boogie was rewritten from the ground up in **pure Rust** to eliminate interpreter overhead, PyQt/Chromium bloat, and sluggish cold starts — while delivering a **60 FPS raymarched 3D GPU interface**, **high-res lossless screen & study vision**, and **44 native Windows automation tools** inside a single self-contained `.exe`.
 
 ### Visual Performance Comparison
 
@@ -185,9 +186,9 @@ Instead of chaining three slow stages (**Speech-to-Text → Chat LLM → Text-to
 - **Native WASAPI Audio (`audio.rs`) + Hardware-Aware Echo Guard (`echo.rs`):** Multi-format (`f32`/`i16`/`u16`) capture & playback with anti-alias resampling, a 180-second mono speaker ring buffer (prevents skipping on fast, multi-minute Gemini bursts), instant speaker buffer clearing (`< 20 ms`) on barge-in or server `interrupted`, 450ms speech hangover + pre-response echo guard reset, `audio/pcm;rate=16000`, and `audioStreamEnd` signaling.
 - **Resilient Gemini Live Client (`gemini.rs`, `main.rs`):** Per-session non-blocking background tool worker with 25s timeout & panic isolation, 20s WebSocket keepalive pings, response-only stall watchdog (never falsely disconnects during quiet listening), turn-safe deferred `goAway` & 14-minute session rotation (never cuts off mid-sentence), exponential reconnect backoff, persistent `boogie.log` diagnostics, and long-term session summary recall.
 - **Native App Launcher (`open_app.rs`) & Fast Browser Control (`browser.rs`):** Resolves & focuses/launches any installed Windows app via Win32 window enumeration, Start Menu `.lnk` shortcuts, Windows Registry `App Paths`, `PATH`, URI schemes, and UWP `Get-StartApps`; opens URLs directly in your default or requested browser (`brave`, `chrome`, `edge`, `firefox`) without hanging.
-- **Real Screen & Browser Vision (`screen_process`, `browser_control` `screenshot`):** Captures monitors or Chromium pages, resizes to `≤1280px` JPEG, and streams directly into Gemini Live `realtimeInput.video`.
+- **Real Screen Vision & Deep Study Brain (`screen_process`, `study_solve`):** Upgrades realtime screen capture to `1920px` Lanczos3 JPEG (`Q92`), and adds a dedicated **Deep Study Brain** (`study_solve`) for ALL subjects from **Primary school (Cấp 1) through University (Đại học)** — captures **lossless full-res PNG** (`≤2560px`) from screen or `Win+Shift+S` clipboard snips, invokes `gemini-2.5-pro` (with automatic fallback to `gemini-2.5-flash`) with `MEDIA_RESOLUTION_HIGH` + `thinkingBudget: 8192`, double-checks signs/steps before answering, and displays a copyable **Study Card** inside the Conversation Drawer.
 
-### 4. Security-First Automation (43 Native Windows Tools)
+### 4. Security-First Automation (44 Native Windows Tools)
 - **Permission Tiers & Confirmation Gate (`confirm.rs`):**
   - `run_command` auto-runs only a strict read-only single-command allowlist (blocking shell chaining `&&`, `;`, `|`, `>`); all mutating commands require on-screen approval.
   - `send_message`, `kill_process` (exact match + numeric PID + protected system process blocklist), `write_file`, `delete_file`, `move_file`, and destructive `computer_settings` require explicit confirmation with request-ID matching (no stale approvals).
@@ -215,6 +216,12 @@ flowchart LR
 ---
 
 ## Changelog
+
+### [`v0.3.0`](https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.3.0) — 2026-11-25
+- **Deep Study Brain (`study_solve`) — All Subjects from Cấp 1 (Primary) to Đại học (University):** Dedicated two-brain architecture routing math, physics, chemistry, biology, programming/SQL, English, literature, history, geography, and economics away from low-res live video into lossless full-res PNG OCR (`≤2560px`) + `MEDIA_RESOLUTION_HIGH` + `thinkingBudget: 8192` via `gemini-2.5-pro` (with automatic seamless fallback to `gemini-2.5-flash` on quota/rate limits).
+- **Zero-Blur Sign & Formula Verification:** Strictly transcribes signs (`+`, `-`, `≤`, `≥`), exponents, subscripts, fractions, and multiple-choice options before solving, double-checks answers by substitution/units/edge cases, and honestly asks to zoom or snip with `Win+Shift+S` (`source="clipboard"`) if anything is obscured.
+- **4 Study Modes & Grade-Level Adaptation:** Supports `solve`, `hint` (Socratic tutor), `check` (find exact step/sign mistake in student work), and `explain`, automatically matching methods to **Primary / Middle / High / University** level.
+- **Crisp Vision & Copyable Study Card UI:** Upgraded resize filter from `Triangle` → `Lanczos3`, bumped `screen_process` to `1920px Q92`, added a **Study Brain** selector (`Auto` / `Flash Thinking` / `Pro Deep Thinking`) in Settings, and added a dedicated **Study Solution Card** with a 1-click **Copy** button in the Conversation Drawer.
 
 ### [`v0.2.0`](https://github.com/thodark/Boogie-AI-Assistant/releases/tag/v0.2.0) — 2026-11-23
 - **3 Graphics Quality Tiers (Low / Medium / High):** Selectable on first-run Setup and anytime in Settings with instant live preview and adaptive FPS (`30` / `45` / `60 FPS`) + adaptive MSAA (`0x` / `2x` / `4x`). **Low (Lite)** uses a zero-loop analytical 3D glass shader (~15× lighter for weak/integrated GPUs) while keeping ripples, refracted plasma glow, speculars, and the 3D orbital ring.
@@ -300,7 +307,7 @@ GitHub Actions runs formatting, strict Clippy (`-D warnings`), and the full unit
     ├── dashboard.rs            # Authenticated local Axum WS server (off by default)
     ├── tools.rs                # Tool registry, vision frames & untrusted tagging
     ├── util.rs                 # UTF-8 safe truncation, SSRF guard, shared HTTP & JPEG
-    └── actions/                # 17 modules implementing 42 native Windows tools (incl. open_app)
+    └── actions/                # 18 modules implementing 44 native Windows tools (incl. study_solve, open_app)
 ```
 
 ---

@@ -10,6 +10,7 @@ pub mod open_app;
 mod reminder;
 mod screen;
 mod send_message;
+mod study;
 mod system;
 mod utils;
 mod video_player;
@@ -27,6 +28,7 @@ pub fn register_all(registry: &mut ToolRegistry, event_tx: broadcast::Sender<App
     computer_control::register(registry);
     files::register(registry);
     inline::register(registry, event_tx.clone());
+    study::register(registry, event_tx.clone());
     open_app::register(registry);
     reminder::register(registry);
     system::register(registry);

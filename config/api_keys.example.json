@@ -13,5 +13,6 @@
   "graphics_quality": "high",
   "color_theme": "obsidian",
   "auto_memory_consolidation": true,
-  "memory_model": "gemini-2.5-flash-lite"
+  "memory_model": "gemini-2.5-flash-lite",
+  "study_brain": "auto"
 }

@@ -8,7 +8,11 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         tool(
             "screen_process",
-            "Capture the user's computer screen and send the image to your vision input so you can see and answer questions about what is currently on screen.",
+            "Quickly look at the user's computer screen for general UI awareness or casual questions \
+             (what app is open, where a button is, what's playing). \
+             DO NOT use this for math, science, homework, exams, quizzes, code debugging, or reading \
+             dense text/formulas — ALWAYS call study_solve instead for high-resolution lossless OCR \
+             and step-by-step verified reasoning.",
             vec![("monitor", param("monitor", "integer", "Monitor index (0-based, default 0)"))],
             vec![],
         ),
@@ -74,7 +78,7 @@ async fn capture_screen_vision(args: Value) -> ToolResult {
                 match screen.capture() {
                     Ok(img) => {
                         let (orig_w, orig_h) = (img.width(), img.height());
-                        match encode_rgba_to_jpeg(img.as_raw(), orig_w, orig_h, 1280, 80) {
+                        match encode_rgba_to_jpeg(img.as_raw(), orig_w, orig_h, 1920, 92) {
                             Ok((jpeg, out_w, out_h)) => {
                                 let kb = jpeg.len() / 1024;
                                 ToolResult::ok_with_image(

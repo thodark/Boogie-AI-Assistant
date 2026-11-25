@@ -141,6 +141,43 @@ impl ColorTheme {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StudyBrainMode {
+    #[default]
+    Auto,
+    Pro,
+    Flash,
+}
+
+impl StudyBrainMode {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Flash, Self::Pro];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Flash => "flash",
+            Self::Pro => "pro",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto (Pro -> Flash)",
+            Self::Flash => "Flash Thinking (Fast / High Quota)",
+            Self::Pro => "Pro Deep Thinking (Max Accuracy)",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "flash" | "fast" | "gemini-2.5-flash" => Self::Flash,
+            "pro" | "deep" | "max" | "gemini-2.5-pro" => Self::Pro,
+            _ => Self::Auto,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ApiConfig {
     pub gemini_api_key: String,
@@ -174,6 +211,8 @@ pub struct ApiConfig {
     pub auto_memory_consolidation: Option<bool>,
     #[serde(default)]
     pub memory_model: Option<String>,
+    #[serde(default)]
+    pub study_brain: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -283,6 +322,13 @@ impl ApiConfig {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(DEFAULT_MEMORY_MODEL)
     }
+
+    pub fn study_brain_mode(&self) -> StudyBrainMode {
+        self.study_brain
+            .as_deref()
+            .map(StudyBrainMode::from_str_loose)
+            .unwrap_or_default()
+    }
 }
 
 pub fn load_system_prompt() -> String {
@@ -344,7 +390,7 @@ pub fn describe_limits(has_vision: bool, has_mic: bool) -> String {
     if has_vision {
         out.push(
             "- Your sight is not continuous. You see nothing until you call a \
-             vision tool (take_screenshot / screen_process), and then only that \
+             vision tool (study_solve / screen_process), and then only that \
              single frame at that moment — you cannot continuously watch the screen."
                 .to_string(),
         );
@@ -536,5 +582,22 @@ mod tests {
         let cfg: ApiConfig = serde_json::from_str(r#"{"gemini_api_key":"AIzaTest"}"#).unwrap();
         assert_eq!(cfg.graphics_quality(), GraphicsQuality::High);
         assert_eq!(cfg.color_theme(), ColorTheme::Obsidian);
+        assert_eq!(cfg.study_brain_mode(), StudyBrainMode::Auto);
+    }
+
+    #[test]
+    fn study_brain_mode_parses_aliases_and_roundtrips() {
+        for mode in StudyBrainMode::ALL {
+            assert_eq!(StudyBrainMode::from_str_loose(mode.as_str()), mode);
+        }
+        assert_eq!(
+            StudyBrainMode::from_str_loose("fast"),
+            StudyBrainMode::Flash
+        );
+        assert_eq!(StudyBrainMode::from_str_loose("deep"), StudyBrainMode::Pro);
+        assert_eq!(
+            StudyBrainMode::from_str_loose("unknown"),
+            StudyBrainMode::Auto
+        );
     }
 }

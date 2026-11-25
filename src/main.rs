@@ -31,6 +31,7 @@ pub const RECV_SAMPLE_RATE: u32 = 24_000;
 const RESPONSE_STALL_SECS: f64 = 35.0;
 const WS_PING_INTERVAL_SECS: u64 = 20;
 const TOOL_EXEC_TIMEOUT_SECS: u64 = 25;
+const STUDY_TOOL_TIMEOUT_SECS: u64 = 60;
 const MONITOR_CHECK_INTERVAL_SECS: u64 = 60;
 const MAX_SESSION_AGE_SECS: u64 = 14 * 60; // Proactive clean refresh before 15m audio limit
 const MAX_LOG_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -1348,14 +1349,17 @@ async fn execute_tool_isolated(
     let started = Instant::now();
     let handle = tokio::spawn(async move { t.execute(&tool_name, args).await });
 
-    let result =
-        match tokio::time::timeout(Duration::from_secs(TOOL_EXEC_TIMEOUT_SECS), handle).await {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => tools::ToolResult::err(format!("tool panicked: {e}")),
-            Err(_) => tools::ToolResult::err(format!(
-                "tool '{name}' timed out after {TOOL_EXEC_TIMEOUT_SECS}s"
-            )),
-        };
+    let timeout_secs = if name == "study_solve" {
+        STUDY_TOOL_TIMEOUT_SECS
+    } else {
+        TOOL_EXEC_TIMEOUT_SECS
+    };
+
+    let result = match tokio::time::timeout(Duration::from_secs(timeout_secs), handle).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => tools::ToolResult::err(format!("tool panicked: {e}")),
+        Err(_) => tools::ToolResult::err(format!("tool '{name}' timed out after {timeout_secs}s")),
+    };
 
     tracing::info!(
         "tool '{}' finished in {}ms (ok={})",

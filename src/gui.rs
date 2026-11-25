@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
-use crate::config::{ApiConfig, ColorTheme, GraphicsQuality};
+use crate::config::{ApiConfig, ColorTheme, GraphicsQuality, StudyBrainMode};
 use crate::orb_shader::{OrbRenderer, OrbUniforms};
 use crate::theme::{self, ThemePalette};
 use crate::{AppEvent, AppState, ConfirmResponse, SharedState};
@@ -35,6 +35,7 @@ const APP_LOGO_PNG: &[u8] = include_bytes!("../assets/logo_icon.png");
 enum LogKind {
     User,
     Boogie,
+    Study,
     Tool,
     System,
 }
@@ -75,6 +76,7 @@ struct SetupForm {
     push_to_talk: bool,
     proactive_audio: bool,
     auto_memory_consolidation: bool,
+    study_brain: StudyBrainMode,
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
     memory_filter: String,
@@ -110,6 +112,7 @@ impl SetupForm {
             push_to_talk: false,
             proactive_audio: true,
             auto_memory_consolidation: true,
+            study_brain: StudyBrainMode::Auto,
             available_inputs,
             available_outputs,
             memory_filter: String::new(),
@@ -145,6 +148,7 @@ impl SetupForm {
             push_to_talk: base.push_to_talk(),
             proactive_audio: base.proactive_audio(),
             auto_memory_consolidation: base.auto_memory_consolidation(),
+            study_brain: base.study_brain_mode(),
             available_inputs,
             available_outputs,
             memory_filter: String::new(),
@@ -457,6 +461,20 @@ impl BoogieGui {
                 kind: LogKind::Boogie,
                 title: "Boogie".to_string(),
                 body: chunk.to_string(),
+                updated_at: now,
+            });
+        } else if let Some(rest) = msg.strip_prefix("Study [") {
+            let (model_label, body) = match rest.split_once("]: ") {
+                Some((m, b)) => (m.trim().to_string(), b.trim().to_string()),
+                None => ("Study Brain".to_string(), rest.trim().to_string()),
+            };
+            if body.is_empty() {
+                return;
+            }
+            self.entries.push(ChatEntry {
+                kind: LogKind::Study,
+                title: model_label,
+                body,
                 updated_at: now,
             });
         } else if let Some(rest) = msg.strip_prefix("tool: ") {
@@ -1099,12 +1117,60 @@ impl BoogieGui {
                     );
                     cursor_y -= pill_size.y + 8.0;
                 }
+                LogKind::Study => {
+                    let pal = self.active_palette();
+                    let pill_col = pal.ui_speaking;
+                    let chip_text =
+                        format!("✦ Study Solution ({}) · Click to read steps", entry.title);
+                    let galley = ui.fonts(|f| {
+                        f.layout_no_wrap(
+                            chip_text,
+                            FontId::new(11.5, FontFamily::Proportional),
+                            Color32::from_rgba_unmultiplied(
+                                pill_col.r(),
+                                pill_col.g(),
+                                pill_col.b(),
+                                (alpha * 245.0) as u8,
+                            ),
+                        )
+                    });
+                    let pill_size = galley.rect.size() + Vec2::new(24.0, 12.0);
+                    let pill_rect = Rect::from_center_size(
+                        Pos2::new(screen.center().x, cursor_y - pill_size.y * 0.5),
+                        pill_size,
+                    );
+                    painter.rect_filled(
+                        pill_rect,
+                        CornerRadius::same(13),
+                        Color32::from_rgba_unmultiplied(14, 24, 34, (alpha * 210.0) as u8),
+                    );
+                    painter.rect_stroke(
+                        pill_rect,
+                        CornerRadius::same(13),
+                        Stroke::new(
+                            1.0_f32,
+                            Color32::from_rgba_unmultiplied(
+                                pill_col.r(),
+                                pill_col.g(),
+                                pill_col.b(),
+                                (alpha * 110.0) as u8,
+                            ),
+                        ),
+                        egui::StrokeKind::Inside,
+                    );
+                    painter.galley(
+                        pill_rect.center() - galley.rect.size() * 0.5,
+                        galley,
+                        Color32::TRANSPARENT,
+                    );
+                    cursor_y -= pill_size.y + 8.0;
+                }
                 LogKind::Boogie | LogKind::User | LogKind::System => {
                     let (font_sz, base_col, prefix) = match entry.kind {
                         LogKind::Boogie => (15.0, TEXT_BRIGHT, ""),
                         LogKind::User => (12.5, Color32::from_rgb(196, 178, 255), "You: "),
                         LogKind::System => (11.0, TEXT_MUTED, ""),
-                        LogKind::Tool => unreachable!(),
+                        LogKind::Tool | LogKind::Study => unreachable!(),
                     };
                     let display = format!("{prefix}{}", truncate_tail(&entry.body, 150));
                     let col = Color32::from_rgba_unmultiplied(
@@ -1365,6 +1431,77 @@ impl BoogieGui {
                                     );
                                 });
                         });
+                    }
+                    LogKind::Study => {
+                        let card_accent = pal.ui_speaking;
+                        egui::Frame::new()
+                            .fill(Color32::from_rgba_unmultiplied(14, 22, 38, 215))
+                            .stroke(Stroke::new(
+                                1.0_f32,
+                                Color32::from_rgba_unmultiplied(
+                                    card_accent.r(),
+                                    card_accent.g(),
+                                    card_accent.b(),
+                                    110,
+                                ),
+                            ))
+                            .corner_radius(CornerRadius::same(14))
+                            .inner_margin(egui::Margin::symmetric(14, 10))
+                            .show(ui, |ui| {
+                                ui.set_width((ui.available_width() - 8.0).max(200.0));
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("✦ STUDY BRAIN · {}", entry.title))
+                                            .size(10.5)
+                                            .color(card_accent)
+                                            .family(FontFamily::Monospace)
+                                            .strong(),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new("Copy")
+                                                            .size(10.5)
+                                                            .color(card_accent),
+                                                    )
+                                                    .fill(Color32::from_rgba_unmultiplied(
+                                                        card_accent.r(),
+                                                        card_accent.g(),
+                                                        card_accent.b(),
+                                                        24,
+                                                    ))
+                                                    .stroke(Stroke::new(
+                                                        1.0_f32,
+                                                        Color32::from_rgba_unmultiplied(
+                                                            card_accent.r(),
+                                                            card_accent.g(),
+                                                            card_accent.b(),
+                                                            85,
+                                                        ),
+                                                    ))
+                                                    .corner_radius(CornerRadius::same(8))
+                                                    .min_size(Vec2::new(46.0, 20.0)),
+                                                )
+                                                .on_hover_text("Copy full study solution")
+                                                .clicked()
+                                            {
+                                                ui.ctx().copy_text(entry.body.clone());
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.add_space(6.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&entry.body).size(12.5).color(TEXT_BRIGHT),
+                                    )
+                                    .selectable(true)
+                                    .wrap(),
+                                );
+                            });
                     }
                     LogKind::Tool => {
                         ui.horizontal_wrapped(|ui| {
@@ -2162,6 +2299,22 @@ impl BoogieGui {
                             });
                         }
 
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Study Brain:").size(12.0).color(TEXT_SOFT));
+                            egui::ComboBox::from_id_salt("setup_study_brain")
+                                .selected_text(form.study_brain.label())
+                                .show_ui(ui, |ui| {
+                                    for mode in StudyBrainMode::ALL {
+                                        ui.selectable_value(
+                                            &mut form.study_brain,
+                                            mode,
+                                            mode.label(),
+                                        );
+                                    }
+                                });
+                        });
+
                         ui.add_space(8.0);
                         ui.checkbox(&mut form.push_to_talk, "Push-to-Talk (hold Space)");
                         ui.checkbox(&mut form.proactive_audio, "Proactive check-ins");
@@ -2238,6 +2391,7 @@ impl BoogieGui {
                             cfg.push_to_talk = Some(form.push_to_talk);
                             cfg.proactive_audio = Some(form.proactive_audio);
                             cfg.auto_memory_consolidation = Some(form.auto_memory_consolidation);
+                            cfg.study_brain = Some(form.study_brain.as_str().to_string());
                             if !form.is_settings && cfg.dashboard_enabled.is_none() {
                                 cfg.dashboard_enabled = Some(false);
                             }

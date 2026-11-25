@@ -116,8 +116,35 @@ pub fn is_blocked_executable(path: &str) -> bool {
     BLOCKED_EXEC_EXTS.iter().any(|ext| lower.ends_with(ext))
 }
 
+/// Encodes an RGBA image to lossless PNG (resizing with sharp Lanczos3 only if larger than `max_dim`).
+/// Preserves crisp mathematical symbols, minus signs, exponents, subscripts, and small text.
+pub fn encode_rgba_to_png(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    max_dim: u32,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| "invalid RGBA buffer dimensions".to_string())?;
+    let dyn_img = image::DynamicImage::ImageRgba8(img);
+    let resized = if dyn_img.width() > max_dim || dyn_img.height() > max_dim {
+        dyn_img.resize(max_dim, max_dim, image::imageops::FilterType::Lanczos3)
+    } else {
+        dyn_img
+    };
+    let rgb = resized.to_rgb8();
+    let (w, h) = (rgb.width(), rgb.height());
+    let mut out = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut out);
+    use image::ImageEncoder as _;
+    encoder
+        .write_image(rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+        .map_err(|e| format!("png encode: {e}"))?;
+    Ok((out, w, h))
+}
+
 /// Resizes an RGBA image down to fit within `max_dim` (preserving aspect ratio) and encodes it
-/// as a compact JPEG suitable for Gemini Live realtime vision frames.
+/// as a sharp JPEG suitable for Gemini Live realtime vision frames.
 pub fn encode_rgba_to_jpeg(
     rgba: &[u8],
     width: u32,
@@ -148,7 +175,7 @@ fn encode_dynamic_to_jpeg(
     quality: u8,
 ) -> Result<(Vec<u8>, u32, u32), String> {
     let resized = if dyn_img.width() > max_dim || dyn_img.height() > max_dim {
-        dyn_img.resize(max_dim, max_dim, image::imageops::FilterType::Triangle)
+        dyn_img.resize(max_dim, max_dim, image::imageops::FilterType::Lanczos3)
     } else {
         dyn_img
     };
@@ -204,5 +231,17 @@ mod tests {
         assert!(is_blocked_executable("installer.exe"));
         assert!(!is_blocked_executable("https://example.com/app.exe"));
         assert!(!is_blocked_executable(r"C:\Users\me\song.mp3"));
+    }
+
+    #[test]
+    fn encodes_lossless_png_preserving_native_size_under_cap() {
+        let rgba = vec![255u8; 4 * 16 * 12];
+        let (png, w, h) = encode_rgba_to_png(&rgba, 16, 12, 2560).unwrap();
+        assert_eq!((w, h), (16, 12));
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        let (png2, w2, h2) = encode_rgba_to_png(&rgba, 16, 12, 8).unwrap();
+        assert!(w2 <= 8 && h2 <= 8);
+        assert!(png2.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 }
