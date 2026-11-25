@@ -40,10 +40,10 @@ pub struct FunctionResponse {
     pub id: String,
     pub name: String,
     pub response: Value,
-    /// Optional multimodal inlineData parts (e.g. high-res JPEG screenshot) bound atomically
-    /// to this exact tool response so Gemini Live never reads a stale realtimeInput video frame.
+    /// Optional Live API scheduling mode (e.g. `"SILENT"` when immediately followed by a
+    /// TRUE 1,120-token `MEDIA_RESOLUTION_HIGH` `clientContent` image turn).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parts: Option<Vec<Value>>,
+    pub scheduling: Option<String>,
 }
 
 pub struct LiveSession {
@@ -351,6 +351,37 @@ impl LiveSession {
         tracing::debug!(
             "sending realtime vision frame ({} bytes JPEG)",
             jpeg_bytes.len()
+        );
+        self.send_json(&msg).await
+    }
+
+    /// Sends a discrete high-resolution JPEG image + instruction as a `clientContent` user turn.
+    /// Unlike `realtimeInput.video` or `functionResponse.parts` (which downsample to ~256 tokens),
+    /// `clientContent` activates Gemini 3.1 Live's full 1,120-token `MEDIA_RESOLUTION_HIGH` tiled
+    /// vision pipeline so tiny math signs, fractions, and coordinates read accurately!
+    pub async fn send_image_turn(&mut self, jpeg_bytes: &[u8], prompt: &str) -> Result<(), String> {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(jpeg_bytes);
+        let msg = serde_json::json!({
+            "clientContent": {
+                "turns": [{
+                    "role": "user",
+                    "parts": [
+                        {
+                            "inlineData": {
+                                "mimeType": "image/jpeg",
+                                "data": b64
+                            }
+                        },
+                        { "text": prompt }
+                    ]
+                }],
+                "turnComplete": true
+            }
+        });
+        tracing::info!(
+            "sending TRUE HIGH-RES clientContent image turn ({} KB JPEG)",
+            jpeg_bytes.len() / 1024
         );
         self.send_json(&msg).await
     }

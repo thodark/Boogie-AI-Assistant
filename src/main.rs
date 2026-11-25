@@ -548,7 +548,7 @@ async fn run_supervisor(
 
 struct ToolBatchOutcome {
     responses: Vec<gemini::FunctionResponse>,
-    vision_frames: Vec<Vec<u8>>,
+    vision_turns: Vec<(Vec<u8>, String)>,
     saw_untrusted: bool,
 }
 
@@ -771,7 +771,7 @@ async fn run_session(
             tokio::spawn(async move {
                 while let Some((calls, mut saw_untrusted)) = tool_job_rx.recv().await {
                     let mut responses = Vec::new();
-                    let vision_frames = Vec::new();
+                    let mut vision_turns = Vec::new();
 
                     for call in calls {
                         let args_str = call.args.to_string();
@@ -892,44 +892,38 @@ async fn run_session(
                         if result.is_untrusted() {
                             saw_untrusted = true;
                         }
-                        // Bind captured screenshots atomically inside `functionResponse.parts`
-                        // (with MEDIA_RESOLUTION_HIGH) instead of async `realtimeInput.video`,
-                        // eliminating low-res video downscaling AND stale-tab frame lag!
-                        let multimodal_parts = result.image_jpeg.as_ref().map(|jpeg| {
-                            use base64::Engine as _;
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(jpeg);
-                            tracing::debug!(
-                                "attaching crisp screenshot ({} KB JPEG) atomically to toolResponse '{}'",
-                                jpeg.len() / 1024,
-                                call.name
-                            );
-                            vec![serde_json::json!({
-                                "inlineData": {
-                                    "mimeType": "image/jpeg",
-                                    "data": b64
-                                }
-                            })]
-                        });
-
                         let formatted = result.formatted_for_model();
-                        let output = if result.is_error {
-                            serde_json::json!({"error": formatted})
+                        // When a tool returns a fresh high-res screenshot, close the tool call
+                        // with `scheduling: "SILENT"` and immediately push the image inside a
+                        // `clientContent` user turn (`turnComplete: true`) — this unlocks Gemini
+                        // 3.1 Live's TRUE 1,120-token `MEDIA_RESOLUTION_HIGH` tiled vision instead
+                        // of the ~256-token downscaled path used by video/functionResponse parts!
+                        let (output, scheduling) = if let Some(jpeg) = result.image_jpeg {
+                            vision_turns.push((jpeg, formatted));
+                            (
+                                serde_json::json!({
+                                    "result": "High-resolution screenshot captured and delivered in the immediate user message."
+                                }),
+                                Some("SILENT".to_string()),
+                            )
+                        } else if result.is_error {
+                            (serde_json::json!({"error": formatted}), None)
                         } else {
-                            serde_json::json!({"result": formatted})
+                            (serde_json::json!({"result": formatted}), None)
                         };
 
                         responses.push(gemini::FunctionResponse {
                             id: call.id,
                             name: call.name,
                             response: output,
-                            parts: multimodal_parts,
+                            scheduling,
                         });
                     }
 
                     if tool_done_tx
                         .send(ToolBatchOutcome {
                             responses,
-                            vision_frames,
+                            vision_turns,
                             saw_untrusted,
                         })
                         .await
@@ -948,6 +942,7 @@ async fn run_session(
         let mut echo_guard = echo::EchoGuard::new();
         let mut ptt_was_active = false;
         let mut model_turn_active = false;
+        let mut ignore_next_silent_turn_complete: usize = 0;
         let mut tools_in_flight: usize = 0;
         let mut deferred_refresh = false;
         let mut last_sent_audio_level: f32 = -1.0;
@@ -1140,6 +1135,10 @@ async fn run_session(
                         }
 
                         gemini::GeminiEvent::TurnComplete => {
+                            if !model_turn_active && ignore_next_silent_turn_complete > 0 {
+                                ignore_next_silent_turn_complete -= 1;
+                                continue;
+                            }
                             model_turn_active = false;
                             awaiting_response_since = None;
                             response_timer = None;
@@ -1228,14 +1227,18 @@ async fn run_session(
                 Some(outcome) = tool_done_rx.recv() => {
                     tools_in_flight = tools_in_flight.saturating_sub(1);
                     saw_untrusted_in_turn |= outcome.saw_untrusted;
-                    for jpeg in outcome.vision_frames {
-                        if let Err(e) = session.send_image(&jpeg).await {
-                            tracing::error!("send vision image failed: {e}");
-                        }
-                    }
+                    let has_silent_vision = !outcome.vision_turns.is_empty();
                     if let Err(e) = session.send_tool_response(&outcome.responses).await {
                         tracing::error!("send tool response: {e}");
                         break;
+                    }
+                    if has_silent_vision {
+                        ignore_next_silent_turn_complete += 1;
+                    }
+                    for (jpeg, prompt) in outcome.vision_turns {
+                        if let Err(e) = session.send_image_turn(&jpeg, &prompt).await {
+                            tracing::error!("send HIGH-RES vision turn failed: {e}");
+                        }
                     }
                     let now = Instant::now();
                     awaiting_response_since = Some(now);

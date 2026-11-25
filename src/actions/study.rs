@@ -196,38 +196,47 @@ fn crop_active_content_rgba(
         return None;
     }
 
-    let is_uniform_col = |x: u32| -> bool {
-        let mut min_r = 255u8;
-        let mut max_r = 0u8;
-        let mut min_g = 255u8;
-        let mut max_g = 0u8;
-        let mut min_b = 255u8;
-        let mut max_b = 0u8;
-        let samples = 18u32;
+    // A gutter column is mostly a flat background color (even if 1-2 floating icons like a Zalo
+    // chat button or TOC icon sit inside the margin, >= 78% of vertical samples still match the
+    // column's top/bottom gutter color!).
+    let is_gutter_col = |x: u32| -> bool {
+        let top_idx = ((y0 as usize) * (w as usize) + (x as usize)) * 4;
+        let bot_idx = (((y1 - 1) as usize) * (w as usize) + (x as usize)) * 4;
+        let ref_r = raw[top_idx];
+        let ref_g = raw[top_idx + 1];
+        let ref_b = raw[top_idx + 2];
+        // Also allow matching bottom pixel in case top pixel hits a header corner
+        let ref2_r = raw[bot_idx];
+        let ref2_g = raw[bot_idx + 1];
+        let ref2_b = raw[bot_idx + 2];
+
+        let samples = 24u32;
         let span = (y1 - y0).max(1);
+        let mut match1 = 0u32;
+        let mut match2 = 0u32;
         for s in 0..samples {
             let y = y0 + (s * span) / samples;
             let idx = ((y as usize) * (w as usize) + (x as usize)) * 4;
             let r = raw[idx];
             let g = raw[idx + 1];
             let b = raw[idx + 2];
-            min_r = min_r.min(r);
-            max_r = max_r.max(r);
-            min_g = min_g.min(g);
-            max_g = max_g.max(g);
-            min_b = min_b.min(b);
-            max_b = max_b.max(b);
+            if r.abs_diff(ref_r) <= 18 && g.abs_diff(ref_g) <= 18 && b.abs_diff(ref_b) <= 18 {
+                match1 += 1;
+            }
+            if r.abs_diff(ref2_r) <= 18 && g.abs_diff(ref2_g) <= 18 && b.abs_diff(ref2_b) <= 18 {
+                match2 += 1;
+            }
         }
-        (max_r - min_r) <= 16 && (max_g - min_g) <= 16 && (max_b - min_b) <= 16
+        match1.max(match2) >= 19 // >= 79% flat background along the column
     };
 
     let max_side_trim = (w * 20) / 100;
     let mut x0 = 0u32;
-    while x0 + 8 <= max_side_trim && is_uniform_col(x0) {
+    while x0 + 8 <= max_side_trim && is_gutter_col(x0) {
         x0 += 8;
     }
     let mut x1 = w;
-    while w - x1 + 8 <= max_side_trim && x1 > x0 + 8 && is_uniform_col(x1 - 1) {
+    while w - x1 + 8 <= max_side_trim && x1 > x0 + 8 && is_gutter_col(x1 - 1) {
         x1 -= 8;
     }
     // Leave a tiny 12px breathing margin around detected text edge
@@ -1268,14 +1277,21 @@ mod tests {
     fn smart_content_crop_trims_browser_chrome_taskbar_and_side_gutters() {
         let (w, h) = (1920u32, 1080u32);
         let mut rgba = vec![0u8; (w * h * 4) as usize];
-        // Fill background with uniform dark gutter (24, 24, 30), center content [320..1600] with varied text pixels
+        // Fill background with uniform dark gutter (24, 24, 30), center content [320..1600] with varied text pixels,
+        // PLUS floating sidebar buttons (like a left TOC icon & right Zalo icon) inside the gutters!
         for y in 0..h {
             for x in 0..w {
                 let idx = ((y * w + x) * 4) as usize;
+                let is_floating_btn = ((40..100).contains(&x) && (260..340).contains(&y))
+                    || ((1780..1860).contains(&x) && (720..820).contains(&y));
                 if (320..1600).contains(&x) && (90..1020).contains(&y) {
                     rgba[idx] = ((x + y) % 255) as u8;
                     rgba[idx + 1] = ((x * 3) % 255) as u8;
                     rgba[idx + 2] = 240;
+                } else if is_floating_btn {
+                    rgba[idx] = 0;
+                    rgba[idx + 1] = 140;
+                    rgba[idx + 2] = 255;
                 } else {
                     rgba[idx] = 24;
                     rgba[idx + 1] = 24;
