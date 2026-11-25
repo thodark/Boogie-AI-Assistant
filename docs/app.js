@@ -21,11 +21,11 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Liên hệ",
       "nav.cta": "Tải ngay",
-      "hero.badge": "Mới v0.4.1: Giải bài trên màn hình tức thì ~1.3s + Bảng Study Visual & Xuất PDF/Word/Excel",
+      "hero.badge": "Mới v0.4.2: Nâng cấp Live Vision MEDIA_RESOLUTION_HIGH (nét gấp 4×), chống đọc nhầm tab cũ",
       "hero.title": 'Trợ lý AI giọng nói <span class="gradient-text">kiểu JARVIS</span> ngay trên Windows của bạn.',
       "hero.subtitle": "Tải về là chạy ngay — không cần cài đặt phức tạp, không cần biết code. Nói chuyện tự nhiên tiếng Việt / Anh với phản hồi ~0.58 giây, bảng dạy học tương tác Study Visual (đồ thị, sơ đồ, Art Study), xuất đề cương PDF/Word/Excel có hộp thoại chọn chỗ lưu, điều khiển 46 tác vụ Windows và trí nhớ thông minh.",
       "hero.downloadZip": "Tải cho Windows (ZIP — Khuyên dùng)",
-      "hero.downloadExe": "Bản Portable 1 file (Boogie-v0.4.1.exe)",
+      "hero.downloadExe": "Bản Portable 1 file (Boogie-v0.4.2.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
       "hero.trust2": "Không cần Rust, Cargo hay Python",
       "hero.trust3": "Chạy Portable không cần cài",
@@ -43,7 +43,7 @@
       "download.zipDesc": "Gói Portable đầy đủ gồm file <code>.exe</code> kèm số phiên bản, mẫu cấu hình, hướng dẫn và giấy phép MIT. Xóa thư mục bản cũ tải bản mới vẫn giữ nguyên 100% API key và trí nhớ!",
       "download.exeDesc": "Bản chạy thẳng 1 tệp duy nhất có kèm số phiên bản trên tên file (vd: <code>Boogie-v0.4.0.exe</code>). API key, cấu hình và bộ nhớ lưu bền vững trong <code>%APPDATA%\\Boogie\\</code> nên đổi bản mới không lo mất dữ liệu.",
       "download.zipBtn": "Tải gói ZIP",
-      "download.exeBtn": "Tải Boogie-v0.4.1.exe",
+      "download.exeBtn": "Tải Boogie-v0.4.2.exe",
       "sha.title": "Kiểm tra mã toàn vẹn SHA-256",
       "sha.desc": "Đối chiếu mã SHA-256 sau khi tải để chắc chắn 100% file nguyên bản từ GitHub Releases và không bị chỉnh sửa.",
       "sha.fileCol": 'Tệp phát hành (<span id="sha-release-tag">latest</span>)',
@@ -121,11 +121,11 @@
       "nav.changelog": "Changelog",
       "nav.contact": "Contact",
       "nav.cta": "Download",
-      "hero.badge": "New in v0.4.1: Instant ~1.3s On-Screen Solving, Study Visual & PDF/Word/Excel Studio",
+      "hero.badge": "New in v0.4.2: 4× Sharper MEDIA_RESOLUTION_HIGH Live Vision & Zero Stale-Tab Reads",
       "hero.title": 'A <span class="gradient-text">JARVIS-style</span> real-time voice AI assistant for Windows.',
       "hero.subtitle": "Download and run instantly — no installer, no Rust or Python, no coding required. Talk naturally in English or Vietnamese (~0.58s TTFB), open an interactive split-screen Study Visual & Art Study board, export PDF/Word/Excel study guides with a mandatory Windows Save As picker, and automate 46 Windows tools.",
       "hero.downloadZip": "Download for Windows (ZIP — Recommended)",
-      "hero.downloadExe": "Portable Single File (Boogie-v0.4.1.exe)",
+      "hero.downloadExe": "Portable Single File (Boogie-v0.4.2.exe)",
       "hero.trust1": "Windows 10 / 11 (64-bit)",
       "hero.trust2": "No Rust, Cargo, or Python needed",
       "hero.trust3": "Portable — zero installation",
@@ -143,7 +143,7 @@
       "download.zipDesc": "Complete bundle with the versioned <code>.exe</code>, example config, README, and MIT License. Delete old folders anytime when upgrading — your API key and memories stay safe!",
       "download.exeDesc": "Standalone single executable clearly labeled with its version (e.g. <code>Boogie-v0.4.0.exe</code>). API key, settings, and memories are stored persistently in <code>%APPDATA%\\Boogie\\</code> across upgrades.",
       "download.zipBtn": "Download ZIP Bundle",
-      "download.exeBtn": "Download Boogie-v0.4.1.exe",
+      "download.exeBtn": "Download Boogie-v0.4.2.exe",
       "sha.title": "Verify Release Integrity (SHA-256)",
       "sha.desc": "Compare your downloaded file's SHA-256 hash to guarantee it came untouched from official GitHub Releases.",
       "sha.fileCol": 'Release file (<span id="sha-release-tag">latest</span>)',
@@ -528,6 +528,16 @@
   ];
 
   const CHANGELOG = {
+    v042: {
+      vi: [
+        "<strong>Sửa triệt để lỗi đọc nhầm công thức &amp; đọc nhầm tab cũ (<code>MEDIA_RESOLUTION_HIGH</code> + <code>functionResponse.parts</code>):</strong> Bật độ phân giải cao 1,120 token (nét gấp 4×) cho Gemini Live và gắn ảnh chụp màn hình trực tiếp vào đúng lượt <code>functionResponse.parts</code> kèm mã <code>#CAPTURE</code> và tiêu đề cửa sổ đang mở — loại bỏ hoàn toàn kênh <code>realtimeInput.video</code> mờ &amp; hay trễ khung hình cũ.",
+        "<strong>Tự động cắt bỏ viền thừa / tab trình duyệt / taskbar &amp; chống đọc nhầm ảnh clipboard cũ:</strong> Tự động zoom sạch vùng nội dung chính của đề bài (tăng gần 2× mật độ điểm ảnh cho từng chữ số), tự nhận diện môn Toán/Lý/Hóa ngay từ tiêu đề tab trình duyệt (kể cả khi bạn chỉ nói \"câu 16\") và chỉ đọc clipboard khi bạn nói rõ ảnh cắt <code>Win+Shift+S</code>.",
+      ],
+      en: [
+        "<strong>Fixed Blurry Formula OCR &amp; Stale-Tab Reads (<code>MEDIA_RESOLUTION_HIGH</code> + <code>functionResponse.parts</code>):</strong> Enabled 1,120-token high-resolution vision in Gemini Live setup and moved screenshot delivery from async low-res <code>realtimeInput.video</code> into atomic <code>functionResponse.parts</code> stamped with capture IDs &amp; active window titles.",
+        "<strong>Smart Content Crop, Anti-Stale Clipboard Guard &amp; Tab-Title STEM Detection:</strong> Automatically trims taskbar, browser chrome, and solid side margins for ~2× sharper text density, detects Math/Physics/Chemistry exams straight from the browser tab title, and prevents stale clipboard captures when asking about the live screen.",
+      ],
+    },
     v041: {
       vi: [
         "<strong>Smart Hybrid — Vừa tức thì (~1.3s), vừa chuẩn xác Toán/Lý/Hóa:</strong> Chế độ mặc định <code>Auto</code> của <code>study_solve</code> giờ tự phân luồng thông minh: trắc nghiệm lý thuyết / IT / Tiếng Anh đi thẳng <strong>Direct Live Vision (~1.3 giây, 0 tốn quota REST)</strong>; riêng Toán, Lý, Hóa &amp; chấm sai dấu dùng <code>gemini-2.5-flash</code> có suy luận kiểm chứng dấu (~2.5–4 giây, timeout cứng 12s, tự chuyển 0ms về Live Vision nếu hết 20 lượt/ngày).",
@@ -788,11 +798,13 @@
   }
 
   function renderChangelog() {
+    const v042 = document.getElementById("cl-v042");
     const v041 = document.getElementById("cl-v041");
     const v040 = document.getElementById("cl-v040");
     const v030 = document.getElementById("cl-v030");
     const v020 = document.getElementById("cl-v020");
     const v010 = document.getElementById("cl-v010");
+    if (v042) v042.innerHTML = CHANGELOG.v042[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v041) v041.innerHTML = CHANGELOG.v041[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v040) v040.innerHTML = CHANGELOG.v040[currentLang].map((li) => `<li>${li}</li>`).join("");
     if (v030) v030.innerHTML = CHANGELOG.v030[currentLang].map((li) => `<li>${li}</li>`).join("");
@@ -854,7 +866,7 @@
     syncReleaseTagText();
   }
 
-  let latestTagText = "v0.4.1";
+  let latestTagText = "v0.4.2";
   function syncReleaseTagText() {
     const shaTag = document.getElementById("sha-release-tag");
     if (shaTag) shaTag.textContent = latestTagText;
@@ -871,7 +883,7 @@
       });
       if (!res.ok) throw new Error("release fetch failed");
       const rel = await res.json();
-      const tag = rel.tag_name || "v0.4.1";
+      const tag = rel.tag_name || "v0.4.2";
       latestTagText = tag;
 
       ["nav-version", "hero-release-tag", "card-zip-version", "card-exe-version", "sha-release-tag"].forEach((id) => {

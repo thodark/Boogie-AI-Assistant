@@ -40,6 +40,10 @@ pub struct FunctionResponse {
     pub id: String,
     pub name: String,
     pub response: Value,
+    /// Optional multimodal inlineData parts (e.g. high-res JPEG screenshot) bound atomically
+    /// to this exact tool response so Gemini Live never reads a stale realtimeInput video frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parts: Option<Vec<Value>>,
 }
 
 pub struct LiveSession {
@@ -266,6 +270,7 @@ impl LiveSession {
                 "model": config.model,
                 "generationConfig": {
                     "responseModalities": ["AUDIO"],
+                    "mediaResolution": "MEDIA_RESOLUTION_HIGH",
                     "speechConfig": {
                         "voiceConfig": {
                             "prebuiltVoiceConfig": {
@@ -330,7 +335,8 @@ impl LiveSession {
         self.send_json(&msg).await
     }
 
-    /// Sends a JPEG vision frame into Gemini Live `realtimeInput.video`.
+    /// Sends a JPEG vision frame into Gemini Live `realtimeInput.video` (legacy streaming channel).
+    #[allow(dead_code)]
     pub async fn send_image(&mut self, jpeg_bytes: &[u8]) -> Result<(), String> {
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD.encode(jpeg_bytes);

@@ -1,6 +1,7 @@
 use base64::Engine as _;
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -27,6 +28,7 @@ static STUDY_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static FAST_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static PRO_COOLDOWN_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 static PERMA_UNAVAILABLE_MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn study_http_client(fast_lane: bool) -> &'static reqwest::Client {
     if fast_lane {
@@ -48,7 +50,61 @@ fn study_http_client(fast_lane: bool) -> &'static reqwest::Client {
     }
 }
 
-fn needs_verified_stem_solver(subject: &str, mode: &str, question: &str) -> bool {
+pub(crate) fn next_capture_seq() -> u64 {
+    CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(windows)]
+pub(crate) fn get_foreground_window_title() -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return "Desktop".to_string();
+        }
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut buf);
+        if len > 0 {
+            let title = String::from_utf16_lossy(&buf[..len as usize])
+                .trim()
+                .to_string();
+            if !title.is_empty() {
+                return truncate_chars(&title, 120).to_string();
+            }
+        }
+    }
+    "Desktop".to_string()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn get_foreground_window_title() -> String {
+    "Desktop".to_string()
+}
+
+fn question_explicitly_asks_clipboard(question: &str) -> bool {
+    let q = question.to_lowercase();
+    const CLIPBOARD_HINTS: &[&str] = &[
+        "clipboard",
+        "snip",
+        "win+shift+s",
+        "bộ nhớ tạm",
+        "ảnh cắt",
+        "vừa cắt",
+        "đã cắt",
+        "chụp vùng",
+        "vừa copy",
+        "đã copy",
+        "copy ảnh",
+    ];
+    CLIPBOARD_HINTS.iter().any(|kw| q.contains(kw))
+}
+
+fn needs_verified_stem_solver(
+    subject: &str,
+    mode: &str,
+    question: &str,
+    window_title: &str,
+) -> bool {
     if mode == "check" {
         return true;
     }
@@ -71,9 +127,14 @@ fn needs_verified_stem_solver(subject: &str, mode: &str, question: &str) -> bool
     ) {
         return true;
     }
-    let q = question.to_lowercase();
+    let combined = format!(
+        "{} {}",
+        question.to_lowercase(),
+        window_title.to_lowercase()
+    );
     const STEM_HINTS: &[&str] = &[
         "toán",
+        "môn toán",
         "tích phân",
         "đạo hàm",
         "phương trình",
@@ -82,6 +143,9 @@ fn needs_verified_stem_solver(subject: &str, mode: &str, question: &str) -> bool
         "ma trận",
         "xác suất",
         "hình học",
+        "oxyz",
+        "số phức",
+        "môđun",
         "logarit",
         "lượng giác",
         "vật lý",
@@ -98,7 +162,91 @@ fn needs_verified_stem_solver(subject: &str, mode: &str, question: &str) -> bool
         "calculus",
         "solve for x",
     ];
-    STEM_HINTS.iter().any(|kw| q.contains(kw))
+    STEM_HINTS.iter().any(|kw| combined.contains(kw))
+}
+
+/// Automatically trims the Windows taskbar, browser top chrome (when active window is a browser),
+/// and uniform solid left/right page gutters on full-screen captures so exam text & math formulas
+/// receive ~1.8-2x higher effective pixel density inside Gemini's visual tiles.
+fn crop_active_content_rgba(
+    raw: &[u8],
+    w: u32,
+    h: u32,
+    window_title: &str,
+) -> Option<(Vec<u8>, u32, u32)> {
+    if w < 1200 || h < 700 || raw.len() < (w as usize) * (h as usize) * 4 {
+        return None;
+    }
+    let lower_title = window_title.to_lowercase();
+    let is_browser = [
+        "brave",
+        "chrome",
+        "edge",
+        "firefox",
+        "opera",
+        "vivaldi",
+        "cốc cốc",
+    ]
+    .iter()
+    .any(|b| lower_title.contains(b));
+
+    let y0 = if is_browser { (h * 72) / 1000 } else { 0 };
+    let y1 = h.saturating_sub((h * 46) / 1000);
+    if y1 <= y0 + (h * 60) / 100 {
+        return None;
+    }
+
+    let is_uniform_col = |x: u32| -> bool {
+        let mut min_r = 255u8;
+        let mut max_r = 0u8;
+        let mut min_g = 255u8;
+        let mut max_g = 0u8;
+        let mut min_b = 255u8;
+        let mut max_b = 0u8;
+        let samples = 18u32;
+        let span = (y1 - y0).max(1);
+        for s in 0..samples {
+            let y = y0 + (s * span) / samples;
+            let idx = ((y as usize) * (w as usize) + (x as usize)) * 4;
+            let r = raw[idx];
+            let g = raw[idx + 1];
+            let b = raw[idx + 2];
+            min_r = min_r.min(r);
+            max_r = max_r.max(r);
+            min_g = min_g.min(g);
+            max_g = max_g.max(g);
+            min_b = min_b.min(b);
+            max_b = max_b.max(b);
+        }
+        (max_r - min_r) <= 16 && (max_g - min_g) <= 16 && (max_b - min_b) <= 16
+    };
+
+    let max_side_trim = (w * 20) / 100;
+    let mut x0 = 0u32;
+    while x0 + 8 <= max_side_trim && is_uniform_col(x0) {
+        x0 += 8;
+    }
+    let mut x1 = w;
+    while w - x1 + 8 <= max_side_trim && x1 > x0 + 8 && is_uniform_col(x1 - 1) {
+        x1 -= 8;
+    }
+    // Leave a tiny 12px breathing margin around detected text edge
+    x0 = x0.saturating_sub(12);
+    x1 = (x1 + 12).min(w);
+
+    let cw = x1.saturating_sub(x0);
+    let ch = y1.saturating_sub(y0);
+    if cw < (w * 55) / 100 || ch < (h * 60) / 100 || (cw == w && ch == h) {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity((cw as usize) * (ch as usize) * 4);
+    let row_bytes = (cw as usize) * 4;
+    for y in y0..y1 {
+        let start = ((y as usize) * (w as usize) + (x0 as usize)) * 4;
+        out.extend_from_slice(&raw[start..start + row_bytes]);
+    }
+    Some((out, cw, ch))
 }
 
 fn is_model_perma_disabled(model: &str) -> bool {
@@ -365,20 +513,30 @@ pub(crate) fn capture_screen_png(
         .capture()
         .map_err(|e| format!("screen capture failed: {e}"))?;
     // Fire shutter beep IMMEDIATELY (~25ms) once raw screen pixels are safely in RAM
-    // BEFORE image encoding — so the user can Alt+Tab right away!
+    // BEFORE image cropping/encoding — so the user can Alt+Tab right away!
     if let Some(tx) = notify_tx {
         let _ = tx.send(AppEvent::PlayChime(crate::ChimeKind::ScreenCaptured));
     }
     let (orig_w, orig_h) = (img.width(), img.height());
-    // High-resolution Q90 JPEG: razor-sharp text & math signs at ~2x smaller payload than Q95 -> faster Live Vision upload!
-    let (jpg, out_w, out_h) =
-        encode_rgba_to_jpeg(img.as_raw(), orig_w, orig_h, STUDY_MAX_SCREEN_DIM, 90)?;
+    let win_title = get_foreground_window_title();
+    let (jpg, out_w, out_h, crop_note) = if let Some((cropped, cw, ch)) =
+        crop_active_content_rgba(img.as_raw(), orig_w, orig_h, &win_title)
+    {
+        let (j, ow, oh) = encode_rgba_to_jpeg(&cropped, cw, ch, STUDY_MAX_SCREEN_DIM, 92)?;
+        (j, ow, oh, "smart-cropped")
+    } else {
+        let (j, ow, oh) =
+            encode_rgba_to_jpeg(img.as_raw(), orig_w, orig_h, STUDY_MAX_SCREEN_DIM, 92)?;
+        (j, ow, oh, "full")
+    };
     Ok(CapturedImage {
         bytes: jpg,
         mime_type: "image/jpeg",
         width: out_w,
         height: out_h,
-        source_desc: format!("monitor {idx} ({out_w}x{out_h} crisp Q90 JPEG)"),
+        source_desc: format!(
+            "monitor {idx} ({out_w}x{out_h} {crop_note} Q92 JPEG · Window: '{win_title}')"
+        ),
     })
 }
 
@@ -795,12 +953,27 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
         return ToolResult::err("question is required for study_solve");
     }
 
-    let source = args
+    let raw_source = args
         .get("source")
         .and_then(|v| v.as_str())
         .unwrap_or("screen")
         .trim()
         .to_lowercase();
+    // Guard against Gemini Live accidentally choosing stale `clipboard` when user asked about "trên màn hình"!
+    let source = if raw_source == "clipboard" && !question_explicitly_asks_clipboard(&question) {
+        tracing::info!(
+            "study_solve overriding source='clipboard' -> 'screen' (user did not ask for clipboard)"
+        );
+        "screen".to_string()
+    } else {
+        raw_source
+    };
+    let active_window_title = if source == "screen" {
+        get_foreground_window_title()
+    } else {
+        String::new()
+    };
+    let capture_id = next_capture_seq();
     let subject = args
         .get("subject")
         .and_then(|v| v.as_str())
@@ -903,7 +1076,8 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
     //       with instant 0ms skip to Direct Crisp Live Vision if 20/day quota was already reached!
     // - Pro mode: Dedicated Deep REST Verification (Pro -> Flash, hard 15s cap) with seamless Live Vision fallback.
     let mode_cfg = cfg.study_brain_mode();
-    let wants_stem_verify = needs_verified_stem_solver(&subject, &mode, &question);
+    let wants_stem_verify =
+        needs_verified_stem_solver(&subject, &mode, &question, &active_window_title);
     let use_instant_live_vision = match mode_cfg {
         StudyBrainMode::Flash => true,
         StudyBrainMode::Auto => !wants_stem_verify || is_model_perma_disabled(FLASH_MODEL),
@@ -919,13 +1093,18 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
             0.96,
         );
         let _ = event_tx.send(AppEvent::Log(format!(
-            "Study [instant-live-vision]: Captured {} ({} KB) -> Instant Live Vision",
+            "Study [instant-live-vision #{capture_id}]: Captured {} ({} KB) -> Atomic HIGH-RES Live Vision",
             img.source_desc,
             jpeg.len() / 1024
         )));
         return ToolResult::ok_with_image(
             format!(
-                "[INSTANT CRISP LIVE VISION ({}) — answer IMMEDIATELY in 1-3 crisp sentences! Carefully read every question, digit, sign (+/-), exponent, and option A/B/C/D in this high-res 1920px screenshot, double-check your answer silently, state the exact final answer FIRST, then give only the tightest key reason in {language} (level={level}, mode={mode}). Request: {question}]",
+                "[FRESH HIGH-RES SCREENSHOT CAPTURE #{capture_id} ({}) — DISCARD AND IGNORE ALL PREVIOUS SCREENSHOTS/TABS FROM EARLIER TURNS! \
+                 Inspect ONLY the image attached to THIS tool response. \
+                 ANTI-HALLUCINATION PROTOCOL: (1) Read the exact requested question and its exact A/B/C/D options verbatim from THIS image; \
+                 (2) Solve step-by-step concisely and verify every +/- sign & number matches ONE of the visible options A/B/C/D; \
+                 (3) NEVER invent an answer that is not among the visible options — if any symbol/digit is genuinely too small or blurry to be 100% certain, tell the user honestly to zoom in (Ctrl+) or snip it with Win+Shift+S! \
+                 Answer clearly in {language} (level={level}, mode={mode}). Request: {question}]",
                 img.source_desc
             ),
             jpeg,
@@ -975,7 +1154,8 @@ async fn study_solve_handler(args: Value, event_tx: broadcast::Sender<AppEvent>)
                 )));
                 return ToolResult::ok_with_image(
                     format!(
-                        "[DIRECT CRISP LIVE VISION FALLBACK ({}) — secondary REST solver is temporarily at quota, so YOU solve directly from this high-res screenshot! Do NOT say the tool failed. Carefully inspect every digit, sign (+/-), exponent, and option A/B/C/D, double-check your answer silently, and give a clear concise solution in {language} (level={level}, mode={mode}). Request: {question}]",
+                        "[FRESH HIGH-RES LIVE VISION FALLBACK CAPTURE #{capture_id} ({}) — DISCARD ALL PREVIOUS SCREENSHOTS/TABS! Secondary REST solver is at quota, so solve directly from THIS attached image without mentioning any error. \
+                         Read the exact requested question & all visible A/B/C/D options first, compute carefully checking every +/- sign, and verify your answer matches one of the visible options verbatim (if any digit is genuinely too small/unclear, ask the user to zoom in or snip with Win+Shift+S instead of guessing). Answer in {language} (level={level}, mode={mode}). Request: {question}]",
                         img.source_desc
                     ),
                     jpeg,
@@ -1037,29 +1217,78 @@ mod tests {
 
     #[test]
     fn smart_hybrid_routing_distinguishes_quizzes_from_stem_math() {
-        // IT / networking / English / general quizzes go straight to ~1.3s Instant Live Vision
+        // IT / networking / English / general quizzes go straight to Instant HIGH-RES Live Vision
         assert!(!needs_verified_stem_solver(
             "informatics",
             "solve",
-            "Giải câu trắc nghiệm Quản trị hệ thống mạng Windows trên màn hình"
+            "Giải câu trắc nghiệm Quản trị hệ thống mạng Windows trên màn hình",
+            "Ôn thi Quản trị hệ thống mạng - Brave"
         ));
         assert!(!needs_verified_stem_solver(
             "english",
             "solve",
-            "Choose the best answer A, B, C, or D"
+            "Choose the best answer A, B, C, or D",
+            "IELTS Reading Test - Brave"
         ));
-        // Math / Physics / Chemistry / check-work go to verified thinking solver
-        assert!(needs_verified_stem_solver("math", "solve", "Giải câu 3"));
+        // Math / Physics / Chemistry detected from subject, question, OR active browser tab title!
+        assert!(needs_verified_stem_solver(
+            "math",
+            "solve",
+            "Giải câu 3",
+            ""
+        ));
         assert!(needs_verified_stem_solver(
             "general",
             "solve",
-            "Tính tích phân và đạo hàm câu 2 trên màn hình"
+            "Cho biết kết quả câu 16 trên màn hình",
+            "Tổng hợp đề thi học kỳ 2 lớp 12 môn Toán có đáp án - Brave"
+        ));
+        assert!(needs_verified_stem_solver(
+            "general",
+            "solve",
+            "Tính tích phân và đạo hàm câu 2 trên màn hình",
+            ""
         ));
         assert!(needs_verified_stem_solver(
             "english",
             "check",
-            "Kiểm tra bài làm của mình"
+            "Kiểm tra bài làm của mình",
+            ""
         ));
+        // Anti-stale clipboard guard
+        assert!(!question_explicitly_asks_clipboard(
+            "Check ngữ pháp đoạn này trên màn hình giúp tao"
+        ));
+        assert!(question_explicitly_asks_clipboard(
+            "Giải ảnh vừa cắt Win+Shift+S trong clipboard giúp mình"
+        ));
+    }
+
+    #[test]
+    fn smart_content_crop_trims_browser_chrome_taskbar_and_side_gutters() {
+        let (w, h) = (1920u32, 1080u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        // Fill background with uniform dark gutter (24, 24, 30), center content [320..1600] with varied text pixels
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y * w + x) * 4) as usize;
+                if (320..1600).contains(&x) && (90..1020).contains(&y) {
+                    rgba[idx] = ((x + y) % 255) as u8;
+                    rgba[idx + 1] = ((x * 3) % 255) as u8;
+                    rgba[idx + 2] = 240;
+                } else {
+                    rgba[idx] = 24;
+                    rgba[idx + 1] = 24;
+                    rgba[idx + 2] = 30;
+                }
+                rgba[idx + 3] = 255;
+            }
+        }
+        let (cropped, cw, ch) = crop_active_content_rgba(&rgba, w, h, "Đề thi Toán 12 - Brave")
+            .expect("should crop browser chrome, taskbar, and dark gutters");
+        assert!((1200..1500).contains(&cw), "unexpected cropped width {cw}");
+        assert!((850..980).contains(&ch), "unexpected cropped height {ch}");
+        assert_eq!(cropped.len(), (cw as usize) * (ch as usize) * 4);
     }
 
     #[test]

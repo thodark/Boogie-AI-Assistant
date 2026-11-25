@@ -85,12 +85,14 @@ async fn capture_screen_vision(args: Value, event_tx: broadcast::Sender<AppEvent
                         // Fire shutter chime the instant raw screen pixels are safely captured!
                         let _ = event_tx.send(AppEvent::PlayChime(ChimeKind::ScreenCaptured));
                         let (orig_w, orig_h) = (img.width(), img.height());
+                        let cap_id = crate::actions::study::next_capture_seq();
+                        let win_title = crate::actions::study::get_foreground_window_title();
                         match encode_rgba_to_jpeg(img.as_raw(), orig_w, orig_h, 1920, 92) {
                             Ok((jpeg, out_w, out_h)) => {
                                 let kb = jpeg.len() / 1024;
                                 ToolResult::ok_with_image(
                                     format!(
-                                        "Screen capture of monitor {monitor} ({orig_w}x{orig_h}, scale {:.2}, resized to {out_w}x{out_h}, {kb} KB JPEG) sent to your vision input. Describe or act on what you see.",
+                                        "[FRESH SCREEN CAPTURE #{cap_id} · Active Window: '{win_title}' · Monitor {monitor} ({out_w}x{out_h}, {kb} KB JPEG, scale {:.2}) — IGNORE ALL PREVIOUS SCREENSHOTS/TABS! Read ONLY this brand-new image attached to this tool response and answer accurately.]",
                                         info.scale_factor
                                     ),
                                     jpeg,

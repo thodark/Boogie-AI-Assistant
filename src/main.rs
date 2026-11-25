@@ -771,7 +771,7 @@ async fn run_session(
             tokio::spawn(async move {
                 while let Some((calls, mut saw_untrusted)) = tool_job_rx.recv().await {
                     let mut responses = Vec::new();
-                    let mut vision_frames = Vec::new();
+                    let vision_frames = Vec::new();
 
                     for call in calls {
                         let args_str = call.args.to_string();
@@ -892,9 +892,24 @@ async fn run_session(
                         if result.is_untrusted() {
                             saw_untrusted = true;
                         }
-                        if let Some(jpeg) = result.image_jpeg.clone() {
-                            vision_frames.push(jpeg);
-                        }
+                        // Bind captured screenshots atomically inside `functionResponse.parts`
+                        // (with MEDIA_RESOLUTION_HIGH) instead of async `realtimeInput.video`,
+                        // eliminating low-res video downscaling AND stale-tab frame lag!
+                        let multimodal_parts = result.image_jpeg.as_ref().map(|jpeg| {
+                            use base64::Engine as _;
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(jpeg);
+                            tracing::debug!(
+                                "attaching crisp screenshot ({} KB JPEG) atomically to toolResponse '{}'",
+                                jpeg.len() / 1024,
+                                call.name
+                            );
+                            vec![serde_json::json!({
+                                "inlineData": {
+                                    "mimeType": "image/jpeg",
+                                    "data": b64
+                                }
+                            })]
+                        });
 
                         let formatted = result.formatted_for_model();
                         let output = if result.is_error {
@@ -907,6 +922,7 @@ async fn run_session(
                             id: call.id,
                             name: call.name,
                             response: output,
+                            parts: multimodal_parts,
                         });
                     }
 
